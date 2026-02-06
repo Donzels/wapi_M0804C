@@ -33,7 +33,7 @@
 #endif
 
 #define WAPI_THREAD_PRIORITY            24
-#define WAPI_THREAD_STACK_SIZE          1024
+#define WAPI_THREAD_STACK_SIZE          2048//1024
 
 #include "SEGGER_RTT.h"
 extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
@@ -69,7 +69,7 @@ typedef enum
 /* ---------------- OSAL interface for M0804C handler ---------------- */
 typedef struct
 {
-    void (*pf_os_delay)(int32_t ticks);
+    void (*pf_os_delay_ms)(uint32_t ms);
 } m0804c_os_interface_t;
 
 typedef struct
@@ -157,9 +157,10 @@ wapi_status_t m0804c_use_cert_conn(m0804c_handler_t *const self);
 #if IS_USE_CONN_BY_PWD
 wapi_status_t m0804c_use_pwd_conn(m0804c_handler_t *const self);
 #endif
-wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t length,
+wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t length,\
                          pf_at_recv_parse_t recv_parse_cb);
-
+wapi_status_t m0804c_send_without_response(m0804c_handler_t *const self, uint8_t *buf,\
+                         uint16_t length);
 wapi_status_t m0804c_cert_upload(m0804c_handler_t *const self);
 
 /* return true when valid, others invalid */

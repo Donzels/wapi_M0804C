@@ -1,5 +1,5 @@
 /**
- * @file at_handler.h
+ * @file AT_handler.h
  * @brief AT Command Handler for WAPI Module (Header File)
  *
  * This header defines the core data structures, enumerations, macros, and public APIs
@@ -34,17 +34,12 @@ extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
     } while(0)
 
 
-/**
- * @def AT_CMD_LEN_MAX
- * @brief Maximum length of AT command buffer (in bytes)
- * 
- * Defines the maximum size of the buffer used to format AT commands, 
- * including variable parameters and termination characters (\r\n).
- */
-#define AT_CMD_LEN_MAX                  128
+#define AT_SEND_LEN_MAX                 128
+#define IS_ENABLE_SEND_BUF_PROTECTED    1/* always use in DMA Transmit */
 
 #define AT_TIMEOUT_TICK                 500
 #define TRANSPARANT_TIMEOUT_TICK        2000
+#define MAX_RECV_CNT_OF_TRANS_SEND      2
 
 /**
  * @def AT_CMD_END_MARKER
@@ -55,7 +50,7 @@ extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
  */
 #define AT_CMD_END_MARKER           ((void*)0xDEADBEEF)
 
-#define MAX_RECV_CNT_OF_ONCE_SEND   1
+#define MAX_RECV_CNT_OF_CMD_SEND    1
 
 /**
  * @enum at_status_t
@@ -77,6 +72,21 @@ typedef enum
 } at_status_t;
 
 typedef at_status_t (*pf_at_recv_parse_t)(uint8_t *buf, uint16_t len, void *arg, void *holder);
+
+/**
+ * @struct at_trans_callback_t
+ * @brief Encapsulates transparent send callback parameters
+ * 
+ * This structure bundles all callback-related parameters for transparent data transmission,
+ * reducing function parameter count and improving code maintainability.
+ */
+typedef struct
+{
+    pf_at_recv_parse_t pf_at_recv_parse[MAX_RECV_CNT_OF_TRANS_SEND]; /* Response parsing callback function pointer array */
+    void *arg;                            /* User-defined argument passed to callback */
+    void *holder;                         /* Holder context for callback */
+    uint8_t receive_count;                /* Number of response callbacks expected (0 = default 1) */
+} at_trans_callback_t;
 
 /* ---------------- OSAL interface for AT handler (semaphore + timer) ---------------- */
 typedef struct
@@ -104,8 +114,8 @@ typedef struct
 {
     uint8_t     at_func;      /* Unique ID for the AT command function (e.g., TEST=0, WAPI_CONN=2) */
     char        *send;        /* AT command string template (supports %s placeholders for variables) */    
-    uint8_t     receive_count;       /* must <= MAX_RECV_CNT_OF_ONCE_SEND */
-    pf_at_recv_parse_t pf_at_recv_parse[MAX_RECV_CNT_OF_ONCE_SEND];
+    uint8_t     receive_count;       /* must <= MAX_RECV_CNT_OF_CMD_SEND */
+    pf_at_recv_parse_t pf_at_recv_parse[MAX_RECV_CNT_OF_CMD_SEND];
     void        *arg;         /* User context passed to parse algo callbacks */
 }at_cmd_set_t;
 
@@ -195,13 +205,23 @@ at_status_t at_inst(at_handler_t *const self,
                                     at_input_arg_t *const p_input_args);
 
 /* use AT_CMD_SEND without adding AT_CMD_END_MARKER manually */                                    
-at_status_t at_cmd_send_impl(at_handler_t *const self, uint8_t at_func, ...);  
+/**
+ * @brief Send an AT command with implementation details
+ * 
+ * @param self Pointer to the AT handler instance
+ * @param at_func AT command function identifier (uint8_t value promoted to uint32_t due to variadic function)
+ * @param ... Variable arguments to be passed to the AT command
+ * 
+ * @return AT command execution status
+ */
+at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...);  
 
 #define AT_CMD_SEND(self, at_func, ...)  \
     at_cmd_send_impl((self), (at_func), ##__VA_ARGS__, AT_CMD_END_MARKER)   
     
-/* transparant send with receive callback */
-at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_t len, pf_at_recv_parse_t pf_at_recv_parse, void *arg, void *holder); 
+/* transparant send with receive callback, callback = NULL means send without respond */
+at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_t len, 
+                          const at_trans_callback_t *callback); 
 
 /* call in IDLE ISR */
 void at_notify_recv_isr_cb(at_handler_t *const self);

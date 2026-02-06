@@ -69,7 +69,7 @@
 #define NUM_NOTIFY_ISR_CB_CALL          1           /**< ISR callback retries */
 #define MAX_PARSE_NUM_ONCE_TRIGGER      1           /**< Max frames parsed per ISR callback */
 #define PARSE_THREAD_PRIORITY           25          /**< Parsing thread priority */
-#define PARSE_THREAD_STACK_DEPTH        1024       /**< Parsing thread stack size */
+#define PARSE_THREAD_STACK_DEPTH        2048       /**< Parsing thread stack size */
 #define OS_DELAY_MAX                    0xFFFFFFFF  /**< Max OS delay */
 /** @} */
 

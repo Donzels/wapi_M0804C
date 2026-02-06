@@ -10,7 +10,6 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "WAPI_M0804C.h"
-#include "gpio.h"
 #include <stdio.h>
 
 
@@ -31,17 +30,9 @@
 #define AT_OS(self)         (self)->input_arg->at_input_arg->at_os_interface
 #define UP_OS(self)         (self)->input_arg->at_input_arg->uart_proto_input_arg->os_interface
 
-#include "FreeRTOS.h"
-#define MALLOC(size) pvPortMalloc(size) /* FreeRTOS memory allocation */
-#define FREE(ptr)           \
-    do                      \
-    {                       \
-        if (ptr)            \
-        {                   \
-            vPortFree(ptr); \
-            ptr = NULL;     \
-        }                   \
-    } while (0) /* Safe memory free */
+#include <stdlib.h>
+#define MALLOC(size)        malloc(size)  
+#define FREE(ptr)           free(ptr)
 
 typedef enum
 {
@@ -61,7 +52,7 @@ typedef enum
     RECV_DATA,
     SEND_DATA,
     UPLOAD_CERT_START,
-    UPLOAD_CERT_CHECK,
+    CHECK_CERT,
     DISCONN_SOCKET,
 }at_func_t;
 
@@ -139,6 +130,7 @@ static at_status_t recv_force_correct(uint8_t *buf, uint16_t len, void *arg, voi
 static at_status_t check_connect(uint8_t *buf, uint16_t len, void *arg, void *holder);
 
 /* WAPI operation functions */
+static void wapi_test(m0804c_handler_t *const self);
 static void wapi_no_echo(m0804c_handler_t *const self);
 static void wapi_get_version(m0804c_handler_t *const self);
 static void wapi_check_cert(m0804c_handler_t *const self);
@@ -190,18 +182,18 @@ static void conn_process_success(m0804c_handler_t *self);
 static void reset_wapi_state(m0804c_handler_t *self);
 static wapi_status_t wapi_send_data(m0804c_handler_t *self, uint8_t *buf, uint16_t length,
                                     pf_at_recv_parse_t recv_parse_cb);
-
+static wapi_status_t m0804c_start_recv(m0804c_handler_t *const self);
 /* ============================================================================
  * Global Data
  * ============================================================================ */
 static wapi_info_t g_default_wapi_info = 
 {
-    .server_ip = {192,168,103,195},
+    .server_ip = {192,168,0,195},
     .server_port = 666,
     .local_port = 777,
-    .local_ip = {192,168,103,66},
+    .local_ip = {192,168,0,66},
     .local_ip_mask = {255,255,255,0},
-    .local_gateway = {192,168,103,1},
+    .local_gateway = {192,168,0,4},
     .ssid = "WAPI-24G-8825",
     .pwd = "123456abc",
     .is_exist_certicate = false
@@ -235,7 +227,7 @@ static const at_cmd_set_t m0804c_at_table[] =
     {RECV_DATA, "AT+NRECV,%d,%d,%d\r\n", 1, {at_recv_parse_ok}, NULL},
     {SEND_DATA, "AT+NSEND,%d,%d,", 1, {at_recv_parse_ok}, NULL},
     {UPLOAD_CERT_START, "AT+UPCERT=%s\r\n", 1, {at_recv_parse_upload_cert_start}, NULL},
-    {UPLOAD_CERT_CHECK, "AT+UPCERT=?\r\n", 1, {at_recv_parse_ok}, NULL},
+    {CHECK_CERT, "AT+UPCERT=?\r\n", 1, {at_recv_parse_ok}, NULL},
     {DISCONN_SOCKET, "AT+NSTOP,%d\r\n", 1, {at_recv_parse_ok}, NULL},
 };
 
@@ -252,7 +244,7 @@ static at_cmd_set_table_t g_m0804c_at_cmd_set_table =
 static wapi_process_t wapi_process_init[] = 
 {
     {wapi_no_echo,          wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, 0},
-    {wapi_check_cert,       wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
+    // {wapi_check_cert,       wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
     {wapi_both_2p4_5g,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
     {wapi_set_tx_pwr,       wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
     {wapi_disable_low_pwr,  wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
@@ -263,6 +255,7 @@ static wapi_process_t wapi_process_init[] =
 #if IS_USE_CONN_BY_CERT
 static wapi_process_t wapi_process_use_cert[] = 
 {
+    {wapi_check_cert,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0},
     {wapi_connect_by_cert, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 5*AT_INTERVAL_TICK},    
 };
 #endif
@@ -288,11 +281,13 @@ static wapi_process_t wapi_process_disconn[] =
 
 static wapi_process_t wapi_process_upload_certiface[] = 
 {
-    {wapi_upload_as_cert,        wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0},
-    {wapi_upload_as_cert_file,   wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK},
-    {wapi_upload_asue_cert,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0},
-    {wapi_upload_asue_cert_file, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK},
-    {wapi_check_cert,            wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0}
+    // {wapi_test,                  wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK},
+    {wapi_no_echo,               wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK},
+    {wapi_upload_as_cert,        wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
+    {wapi_upload_as_cert_file,   wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
+    {wapi_upload_asue_cert,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
+    {wapi_upload_asue_cert_file, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
+    {wapi_check_cert,            wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK}
 };
 
 /* ============================================================================
@@ -359,7 +354,6 @@ static void init_process_start(m0804c_handler_t *self)
 static void init_process_retry(m0804c_handler_t *self)
 {
     self->input_arg->pwr_ops->pf_m0804c_close(self);
-    self->input_arg->os_interface->pf_os_delay(2000);
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->init_start_sema_handle);
 }
 
@@ -423,6 +417,7 @@ static void conn_process_retry(m0804c_handler_t *self)
 static void conn_process_success(m0804c_handler_t *self)
 {
     PRIV_DATA(self)->trans_send_flag = true;
+    // m0804c_start_recv(self);
 }
 
 /* ============================================================================
@@ -459,7 +454,7 @@ static at_status_t at_recv_parse_base(uint8_t *buf, uint16_t len, const char* st
     if (!self)
         return AT_ERR_PARAM_INVALID;
     
-    WAPI_DEBUG_STRING(buf, len);
+    // WAPI_DEBUG_STRING(buf, len);
     
     at_status_t ret;
     wapi_recv_state_t wapi_recv_state = {.is_success = false};
@@ -554,6 +549,7 @@ static at_status_t sync_multi_send(uint8_t *buf, uint16_t len, void *arg, void *
     m0804c_handler_t *self = (m0804c_handler_t *)holder;
     if (!self)
         return AT_ERR_PARAM_INVALID;
+    at_reset_send_state(PRIV_DATA(self)->at_handler);
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->multi_send_syn_sema_handle);
     return AT_OK;   
 }
@@ -561,8 +557,8 @@ static at_status_t sync_multi_send(uint8_t *buf, uint16_t len, void *arg, void *
 static at_status_t multi_send_complete_cb(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
     sync_multi_send(buf, len, arg, holder);
-    // recv_force_correct(buf, len, arg, holder);
-    at_recv_parse_ok(buf, len, arg, holder);
+    recv_force_correct(buf, len, arg, holder);
+    // at_recv_parse_ok(buf, len, arg, holder);
     return AT_OK;   
 }
 
@@ -579,6 +575,11 @@ static at_status_t multi_send_recv_timeout(void *arg)
  * WAPI Operation Functions
  * ============================================================================ */
 #if 1
+static void wapi_test(m0804c_handler_t *const self)
+{
+    AT_CMD_SEND(wapi_get_at_handler(self), TEST);/* not echo */    
+}
+
 static void wapi_no_echo(m0804c_handler_t *const self)
 {
     AT_CMD_SEND(wapi_get_at_handler(self), SET_ECHO, 0);/* not echo */    
@@ -587,11 +588,6 @@ static void wapi_no_echo(m0804c_handler_t *const self)
 static void wapi_get_version(m0804c_handler_t *const self)
 {
     AT_CMD_SEND(wapi_get_at_handler(self), GET_VERSION);/* not echo */    
-}
-
-static void wapi_check_cert(m0804c_handler_t *const self)
-{
-    AT_CMD_SEND(wapi_get_at_handler(self), UPLOAD_CERT_CHECK);/* check certifacate */    
 }
 
 static void wapi_both_2p4_5g(m0804c_handler_t *const self)
@@ -631,6 +627,11 @@ static void wapi_set_net_config(m0804c_handler_t *const self)
 }
 
 #if IS_USE_CONN_BY_CERT
+static void wapi_check_cert(m0804c_handler_t *const self)
+{
+    AT_CMD_SEND(wapi_get_at_handler(self), CHECK_CERT);/* check certifacate */    
+}
+
 static void wapi_connect_by_cert(m0804c_handler_t *const self)
 {
     wapi_info_t *wapi_info = self->input_arg->data_provider->pf_get_wapi_info(self);
@@ -758,9 +759,22 @@ static at_status_t check_connect(uint8_t *buf, uint16_t len, void *arg, void *ho
         if(CONN_BY_PWD == PRIV_DATA(self)->wapi_conn_mode)
             m0804c_use_pwd_conn(self);
 #endif
-        return AT_OK; /* Found substring, match successful */
+        return AT_ERR_OTHERS; /* Found substring, match successful */
     }
+    return AT_OK;
+}
 
+static at_status_t send_recv_cb(uint8_t *buf, uint16_t len, void *arg, void *holder)
+{            
+    m0804c_handler_t *self = (m0804c_handler_t *)holder;
+    if (!self)
+        return AT_ERR_PARAM_INVALID;
+    at_status_t status = check_connect(buf, len, arg, holder);/* check if socket error occurs during send/recv */
+    if(status != AT_OK)
+    {
+        return status;
+    }
+    pf_at_recv_parse_t recv_parse_cb = (pf_at_recv_parse_t)arg;   
     /* Traversal complete, substring not found */
     if (recv_parse_cb)
         return recv_parse_cb(buf, len, NULL, holder);
@@ -795,8 +809,52 @@ static wapi_status_t wapi_send_data(m0804c_handler_t *self, uint8_t *buf, uint16
     PRIV_DATA(self)->wapi_send_buf[total_len - 2] = '\r';
     PRIV_DATA(self)->wapi_send_buf[total_len - 1] = '\n';
     
-    at_status_t status = at_trans_send(wapi_get_at_handler(self), PRIV_DATA(self)->wapi_send_buf,\
-                                         total_len, check_connect, (void *)recv_parse_cb, (void *)self);
+    at_trans_callback_t callback = {
+        .pf_at_recv_parse = {check_connect, send_recv_cb},
+        .arg = (void *)recv_parse_cb,
+        .holder = (void *)self,
+        .receive_count = 2
+    };
+    at_status_t status = at_trans_send(wapi_get_at_handler(self), PRIV_DATA(self)->wapi_send_buf,
+                                         total_len, &callback);
+    return (status == AT_OK) ? WAPI_OK : WAPI_ERR_OTHERS;
+}
+
+static wapi_status_t wapi_send_data_without_response(m0804c_handler_t *self, uint8_t *buf, uint16_t length)
+{
+    if (!self || !buf || 0 == length)
+        return WAPI_ERR_PARAM_INVALID;
+    
+    const char *cmd_format = "AT+NSEND,%d,1,";
+    uint16_t command_len = snprintf((char*)PRIV_DATA(self)->wapi_send_buf, SEND_BUF_SIZE, cmd_format, CUR_SOCKET);
+    
+    if (command_len >= SEND_BUF_SIZE)
+    {
+        WAPI_DEBUG_ERR("Send buffer overflow: command too long (len=%u, max=%u)", command_len, SEND_BUF_SIZE);
+        return WAPI_ERR_OTHERS;
+    }
+    
+    uint16_t hex_len;
+    byte_array_to_hex_string(buf, length, PRIV_DATA(self)->wapi_send_buf + command_len, &hex_len);
+    
+    uint16_t total_len = command_len + hex_len + 2; /* +2 for "\r\n" */
+    if (total_len > SEND_BUF_SIZE)
+    {
+        WAPI_DEBUG_ERR("Send buffer overflow: total length exceeds limit (len=%u, max=%u)", total_len, SEND_BUF_SIZE);
+        return WAPI_ERR_OTHERS;
+    }
+    
+    PRIV_DATA(self)->wapi_send_buf[total_len - 2] = '\r';
+    PRIV_DATA(self)->wapi_send_buf[total_len - 1] = '\n';
+    
+    at_trans_callback_t callback = {
+        .pf_at_recv_parse = {check_connect},
+        .arg = NULL,
+        .holder = (void *)self,
+        .receive_count = 1
+    };
+    at_status_t status = at_trans_send(wapi_get_at_handler(self), PRIV_DATA(self)->wapi_send_buf,
+                                         total_len, &callback);
     return (status == AT_OK) ? WAPI_OK : WAPI_ERR_OTHERS;
 }
 
@@ -831,8 +889,16 @@ static void wapi_upload_cert_file_common(m0804c_handler_t *self, file_att_t *fil
         int32_t stat = AT_OS(self)->pf_sema_take(PRIV_DATA(self)->multi_send_syn_sema_handle,\
                                                  AT_TIMEOUT_TICK_STANDARD);
         if(0 == stat)
-            at_trans_send(wapi_get_at_handler(self), file->file_payload + offset, send_len,\
-                             pf_at_recv_parse, NULL, (void *)self);  
+        {
+            at_trans_callback_t callback = {
+                .pf_at_recv_parse = {pf_at_recv_parse},
+                .arg = NULL,
+                .holder = (void *)self,
+                .receive_count = 1
+            };
+            at_trans_send(wapi_get_at_handler(self), file->file_payload + offset, send_len,
+                             &callback);  
+        }
         else   
         {
             multi_send_recv_timeout((void *)self);
@@ -893,7 +959,7 @@ static wapi_status_t table_process(m0804c_handler_t *const self, wapi_process_t 
                     if(wapi_process[i].pf_process_cpl)
                         wapi_process[i].pf_process_cpl(self, i, PROCESS_OK); 
                     if(wapi_process[i].process_interval_tick)
-                        self->input_arg->os_interface->pf_os_delay((int32_t)wapi_process[i].process_interval_tick);    
+                        self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_interval_tick);    
                     ret = AT_OS(self)->pf_sema_give(PRIV_DATA(self)->process_syn_sema_handle);
                     if(0 != ret)
                     {
@@ -903,7 +969,11 @@ static wapi_status_t table_process(m0804c_handler_t *const self, wapi_process_t 
                     break;
                 }  
                 else if(wapi_process[i].process_interval_tick)
-                    self->input_arg->os_interface->pf_os_delay((int32_t)wapi_process[i].process_interval_tick);              
+                {
+                    WAPI_DEBUG_ERR("Process failed, retrying: process_idx=%u, retry=%u", i, j);
+                    self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_interval_tick);
+                }
+                                  
             }                
             else
             {
@@ -1083,56 +1153,22 @@ static void wapi_conn_thread(void *arg)
                        &conn_callbacks);
 }
 
-#if 0
-// static void wapi_open(void)
-// {
-//     HAL_GPIO_WritePin(GPIOB, WAPI_WAKE_Pin, GPIO_PIN_RESET);
-//     HAL_GPIO_WritePin(GPIOA, WAPI_PWR_Pin, GPIO_PIN_RESET);    
-//     osDelay(2000);   
-// }
-
-// static void wapi_close(void)
-// {
-//     HAL_GPIO_WritePin(GPIOB, WAPI_WAKE_Pin, GPIO_PIN_SET);
-//     HAL_GPIO_WritePin(GPIOA, WAPI_PWR_Pin, GPIO_PIN_SET);  
-//     osDelay(2000);
-// }
-
-static void wapi_send_thread(void *arg)
+static wapi_status_t m0804c_start_recv(m0804c_handler_t *const self)
 {
-    m0804c_handler_t *self = (m0804c_handler_t *)arg;    
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
-    {
-        WAPI_DEBUG_ERR("wapi send thread param err!\r\n");
-        return;
-    }
-    uint8_t buf[64] = {0xDE, 0xAD, 0xBE, 0xEF};
-    for(uint8_t i=4; i<64; i++)
-    {
-        buf[i] = i;
-    }
-    while (1)
-    {        
-        AT_OS(self)->pf_sema_take(PRIV_DATA(self)->init_success_sema_handle, OS_DELAY_MAX);
-        for(uint8_t i=0; i<3; i++)
-        {
-            wapi_send_data(self, buf, sizeof(buf), NULL);
-            self->input_arg->os_interface->pf_os_delay(1000);
-        } 
-        // WAPI_DEBUG_OUT("sleep");
-        // disconn_process(self);
-        // self->input_arg->pwr_ops.pf_m0804c_close(self);
-        // enter_stop();  
-        // exit_stop();
-        // osDelay(5000);  
-        // reset_wapi_state();
-        // WAPI_DEBUG_OUT("wake up");   
-        // osSemaphoreRelease(self->priv_data->init_start_sema_handle);        
-        if(self->input_arg->callbacks->wapi_send_process_cpl_cb)
-            self->input_arg->callbacks->wapi_send_process_cpl_cb(self);  
-    }        
+        return WAPI_ERR_HANDLER_NOT_READY;
+    char send_buf[32] = {0};
+    int total_len = sprintf(send_buf, "AT+NRECV,%d,1,1\r\n", CUR_SOCKET);
+    at_trans_callback_t callback = {
+        .pf_at_recv_parse = {check_connect},
+        .arg = NULL,
+        .holder = (void *)self,
+        .receive_count = 1
+    };
+    at_status_t status = at_trans_send(wapi_get_at_handler(self), (uint8_t *)send_buf,
+                                         total_len, &callback);
+    return (status == AT_OK) ? WAPI_OK : WAPI_ERR_OTHERS;
 }
-#endif
 
 
 wapi_status_t m0804c_inst(m0804c_handler_t *const self, wapi_m0804c_input_arg_t *const p_input_args)
@@ -1140,7 +1176,7 @@ wapi_status_t m0804c_inst(m0804c_handler_t *const self, wapi_m0804c_input_arg_t 
     /* Comprehensive input validation */
     if(!self || !p_input_args ||
        !p_input_args->os_interface|| 
-       !p_input_args->os_interface->pf_os_delay||  
+       !p_input_args->os_interface->pf_os_delay_ms||  
        !p_input_args->at_input_arg ||
        !p_input_args->pwr_ops ||
        !p_input_args->pwr_ops->pf_m0804c_open ||
@@ -1183,48 +1219,135 @@ wapi_status_t m0804c_inst(m0804c_handler_t *const self, wapi_m0804c_input_arg_t 
     at_status_t at_status = at_inst(PRIV_DATA(self)->at_handler, at_arg);   
     if(AT_OK != at_status)
     {
-        FREE(self->priv_data->at_handler);
-        FREE(self->priv_data);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
         return WAPI_ERR_OTHERS;
     }
     self->input_arg = p_input_args;
 
-    AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->process_syn_sema_handle);
+    int32_t ret = AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->process_syn_sema_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("process_syn_sema creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->process_syn_sema_handle);
 
-    AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->multi_send_syn_sema_handle);
+    ret = AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->multi_send_syn_sema_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("multi_send_syn_sema creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->multi_send_syn_sema_handle);
 
-    UP_OS(self)->pf_os_queue_create(1, sizeof(wapi_recv_state_t), &PRIV_DATA(self)->recv_state_queue_handle);
+    ret = UP_OS(self)->pf_os_queue_create(1, sizeof(wapi_recv_state_t), &PRIV_DATA(self)->recv_state_queue_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("recv_state_queue creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
 
-    AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->init_start_sema_handle);
+    ret = AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->init_start_sema_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("init_start_sema creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->init_start_sema_handle, 0);
-    AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->init_success_sema_handle);
+    
+    ret = AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->init_success_sema_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("init_success_sema creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->init_success_sema_handle, 0);
+    
 #if IS_USE_CONN_BY_CERT
-    AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->use_cert_sema_handle);
+    ret = AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->use_cert_sema_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("use_cert_sema creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->use_cert_sema_handle, 0);
-    UP_OS(self)->pf_os_thread_create("wapi_use_cert_thread", wapi_use_cert_thread, WAPI_THREAD_STACK_SIZE, \
+    
+    ret = UP_OS(self)->pf_os_thread_create("use_cert", wapi_use_cert_thread, WAPI_THREAD_STACK_SIZE, \
                 WAPI_THREAD_PRIORITY, NULL, self);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("wapi_use_cert_thread creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
 #endif
+    
 #if IS_USE_CONN_BY_PWD
-    AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->use_pwd_sema_handle);
+    ret = AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->use_pwd_sema_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("use_pwd_sema creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->use_pwd_sema_handle, 0);
-    UP_OS(self)->pf_os_thread_create("wapi_use_pwd_thread", wapi_use_pwd_thread, WAPI_THREAD_STACK_SIZE, \
+    
+    ret = UP_OS(self)->pf_os_thread_create("use_pwd", wapi_use_pwd_thread, WAPI_THREAD_STACK_SIZE, \
                 WAPI_THREAD_PRIORITY, NULL, self);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("wapi_use_pwd_thread creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
 #endif
-    AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->connect_cfg_success_sema_handle);
+    
+    ret = AT_OS(self)->pf_sema_binary_create(&PRIV_DATA(self)->connect_cfg_success_sema_handle);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("connect_cfg_success_sema creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->connect_cfg_success_sema_handle, 0);
 
-    UP_OS(self)->pf_os_thread_create("wapi_init_thread", wapi_init_thread, WAPI_THREAD_STACK_SIZE, \
+    ret = UP_OS(self)->pf_os_thread_create("wapi_init", wapi_init_thread, WAPI_THREAD_STACK_SIZE, \
                 WAPI_THREAD_PRIORITY, NULL, self);
-    /* Note: These threads are created but not used in current implementation */
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("wapi_init_thread creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
 
-    UP_OS(self)->pf_os_thread_create("wapi_conn_thread", wapi_conn_thread, WAPI_THREAD_STACK_SIZE, \
+    ret = UP_OS(self)->pf_os_thread_create("wapi_conn", wapi_conn_thread, WAPI_THREAD_STACK_SIZE, \
                 WAPI_THREAD_PRIORITY, NULL, self);
+    if(0 != ret)
+    {
+        WAPI_DEBUG_ERR("wapi_conn_thread creation failed (ret=%d)", ret);
+        FREE(PRIV_DATA(self)->at_handler);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
 
-
-                
     PRIV_DATA(self)->is_inited = true;
     return WAPI_OK;
 }
@@ -1286,6 +1409,19 @@ wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t l
         return WAPI_ERR_SEND_NOT_READY;
 }
 
+wapi_status_t m0804c_send_without_response(m0804c_handler_t *const self, uint8_t *buf, uint16_t length)
+{
+    if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
+        return WAPI_ERR_HANDLER_NOT_READY;
+
+    if(PRIV_DATA(self)->trans_send_flag)    
+        return wapi_send_data_without_response(self, buf, length);
+    else
+        return WAPI_ERR_SEND_NOT_READY;
+}
+
+
+
 wapi_status_t m0804c_cert_upload(m0804c_handler_t *const self)
 {
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
@@ -1293,6 +1429,7 @@ wapi_status_t m0804c_cert_upload(m0804c_handler_t *const self)
     wapi_info_t *wapi_info = self->input_arg->data_provider->pf_get_wapi_info(self);  
     if(!wapi_info->is_exist_certicate)  
         return WAPI_ERR_MISS_CERT;
+    reset_wapi_state(self);
     return cert_upload_process(self);      
 }
 

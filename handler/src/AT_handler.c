@@ -1,6 +1,6 @@
 /*
  ******************************************************************************
- * File Name          : at_handler.c
+ * File Name          : AT_handler.c
  * Description        : AT Command Handler Implementation for WAPI Module
  *                      Implements table-driven AT command management, variadic
  *                      argument validation, UART transmission, and initialization
@@ -16,29 +16,50 @@
 #include <stdio.h>
 
 /* Private Macros ------------------------------------------------------------*/
-#include "FreeRTOS.h"
-#define MALLOC(size) pvPortMalloc(size) /* FreeRTOS memory allocation */
-#define FREE(ptr)           \
-    do                      \
-    {                       \
-        if (ptr)            \
-        {                   \
-            vPortFree(ptr); \
-            ptr = NULL;     \
-        }                   \
-    } while (0) /* Safe memory free */
+#include <stdlib.h>
+#define MALLOC(size)        malloc(size)  
+#define FREE(ptr)           free(ptr)
 
 #define PRIV_DATA(p) (p)->at_priv_data                /* Private internal data */
 #define UART_INTERFACE(p) (p)->at_input_arg->uart_proto_input_arg->uart_ops /* UART hardware interface */
 #define UP_OS_IF(p) (p)->at_input_arg->uart_proto_input_arg->os_interface       /* Reuse UART proto OS iface for queue/thread */
 #define OS_IF(p) (p)->at_input_arg->at_os_interface               /* AT handler OSAL interface */
 
+#define ACQUIRE_SEND_FEEDBACK_SEMA(self, timeout) \
+            OS_IF(self)->pf_sema_take(PRIV_DATA(self)->send_feedback_sema_handle, timeout) \
+
+#define RELEASE_SEND_FEEDBACK_SEMA(self) \
+    do { \
+            OS_IF(self)->pf_sema_give(PRIV_DATA(self)->send_feedback_sema_handle); \
+            AT_DEBUG_OUT("line=%d: Released send feedback semaphore", __LINE__); \
+    } while(0)
+
+#define TIMER_START(self, timeout_ms) \
+    do { \
+        int32_t ret = OS_IF(self)->pf_timer_start(PRIV_DATA(self)->timeout_timer, timeout_ms); \
+        if (0 == ret) { \
+            AT_DEBUG_OUT("line=%d: Timer started with timeout %d ms", __LINE__, timeout_ms); \
+        } else { \
+            AT_DEBUG_ERR("line=%d: Failed to start timer (ret=%d)", __LINE__, ret); \
+        } \
+    } while(0)    
+
+#define TIMER_STOP(self) \
+    do { \
+        int32_t ret = OS_IF(self)->pf_timer_stop(PRIV_DATA(self)->timeout_timer, 0); \
+        if (0 == ret) { \
+            AT_DEBUG_OUT("line=%d: Timer stopped", __LINE__); \
+        } else { \
+            AT_DEBUG_ERR("line=%d: Failed to stop timer (ret=%d)", __LINE__, ret); \
+        } \
+    } while(0)    
+
 /* Private Type Definitions -------------------------------------------------*/
 
 typedef enum
 {
     SEND_CMD = 0,
-    SEND_TRANSPARANT
+    SEND_TRANSPARENT
 }at_send_type_t;
 
 typedef struct
@@ -48,9 +69,8 @@ typedef struct
 
 typedef struct
 {
-    pf_at_recv_parse_t pf_at_recv_parse;
-    void *arg;
-    void *holder;
+    at_trans_callback_t callback;
+    /* Future extension fields can be added here (e.g., retry_count, priority) */
 }transparent_event_t;
 
 
@@ -73,7 +93,8 @@ typedef struct at_priv_data
     uart_proto_t *uart_proto_handle;
     void *send_feedback_sema_handle;
     void *send_queue_handle;
-    void *timeout_timer;       
+    void *timeout_timer;  
+    uint8_t send_buf[AT_SEND_LEN_MAX];     
 } at_priv_data_t;
 
 typedef struct
@@ -81,6 +102,7 @@ typedef struct
     uint8_t *payload;     /* Pointer to the frame payload data */
     uint16_t payload_len; /* Length of the payload data (in bytes) */
 } parse_info_t;
+
 
 /* Private Function Implementations ------------------------------------------*/
 
@@ -142,10 +164,9 @@ static uint8_t count_va_args(uint8_t max_cnt, va_list args)
     return cnt;
 }
 
-at_status_t at_cmd_send_impl(at_handler_t *const self, uint8_t at_func, ...)
+at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...)
 {
     va_list args;
-    char at_cmd_buf[AT_CMD_LEN_MAX] = {0};  /* Buffer for formatted AT command */
     const at_cmd_set_t *cmd_entry = NULL;         /* Pointer to matched command table entry */
     volatile uint8_t expected_param_count = 0;         /* Expected args (from placeholder count) */
     volatile uint8_t actual_param_count = 0;           /* Actual args (from variadic list) */
@@ -187,50 +208,89 @@ at_status_t at_cmd_send_impl(at_handler_t *const self, uint8_t at_func, ...)
     /* Format AT command string with variadic arguments */
     va_start(args, at_func);
 
-    int send_len = vsnprintf(at_cmd_buf, AT_CMD_LEN_MAX, cmd_entry->send, args);
+    int send_len = vsnprintf((char*)PRIV_DATA(self)->send_buf, AT_SEND_LEN_MAX, cmd_entry->send, args);
     va_end(args);
     
     /* Check for formatting errors or buffer overflow */
-    if (send_len < 0 || send_len >= (AT_CMD_LEN_MAX))
+    if (send_len < 0 || send_len >= (AT_SEND_LEN_MAX))
     {
         return AT_ERR_OTHERS;
     } 
 
-    if(0 != OS_IF(self)->pf_sema_take(PRIV_DATA(self)->send_feedback_sema_handle, 0))
+    if(0 != ACQUIRE_SEND_FEEDBACK_SEMA(self, 0))
     {
         AT_DEBUG_ERR("Previous AT command not consumed, send feedback semaphore unavailable");
         return AT_ERR_NOT_CONSUMED;
-    }
+    }      
         
     PRIV_DATA(self)->send_info.at_send_type = SEND_CMD;
     PRIV_DATA(self)->send_info.u.cmd_event.cmd_entry = cmd_entry;
     PRIV_DATA(self)->remain_receive_count = cmd_entry->receive_count;
+    AT_DEBUG_OUT("Send remaining receive count: %u", PRIV_DATA(self)->remain_receive_count);
 
     /* Transmit formatted command via UART (hardware-agnostic callback) */
-    UART_INTERFACE(self)->pf_uart_write((uint8_t*)at_cmd_buf, strlen(at_cmd_buf));
+    UART_INTERFACE(self)->pf_uart_write(PRIV_DATA(self)->send_buf, strlen((char*)PRIV_DATA(self)->send_buf));
 
-    OS_IF(self)->pf_timer_start(PRIV_DATA(self)->timeout_timer, AT_TIMEOUT_TICK);
+    TIMER_START(self, AT_TIMEOUT_TICK);
 
     return AT_OK;
 }
 
-at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_t len,\
-                             pf_at_recv_parse_t pf_at_recv_parse, void *arg, void *holder)
+at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_t len, 
+                          const at_trans_callback_t *callback)
 {
-    
-    if(0 != OS_IF(self)->pf_sema_take(PRIV_DATA(self)->send_feedback_sema_handle, 0))
+    if (!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
+        return AT_ERR_HANDLER_NOT_READY;
+
+    if(0 != ACQUIRE_SEND_FEEDBACK_SEMA(self, 0))
     {
         AT_DEBUG_ERR("Previous transparent data not consumed, send feedback semaphore unavailable");
         return AT_ERR_NOT_CONSUMED;
     }
+    
+    /* Send with response - setup transparent event */
+    if(callback && callback->pf_at_recv_parse[0])
+    {
+        uint8_t recv_count = callback->receive_count ? callback->receive_count : 1;
+        if (recv_count > MAX_RECV_CNT_OF_TRANS_SEND)
+        {
+            RELEASE_SEND_FEEDBACK_SEMA(self);
+            AT_DEBUG_ERR("Transparent receive_count overflow: %u > max=%u", recv_count, MAX_RECV_CNT_OF_TRANS_SEND);
+            return AT_ERR_PARAM_INVALID;
+        }
         
-    PRIV_DATA(self)->send_info.at_send_type = SEND_TRANSPARANT;
-    PRIV_DATA(self)->send_info.u.transparent_event.pf_at_recv_parse = pf_at_recv_parse;
-    PRIV_DATA(self)->send_info.u.transparent_event.arg = arg;
-    PRIV_DATA(self)->send_info.u.transparent_event.holder = holder;
+        /* Validate all callback function pointers up to recv_count */
+        for (uint8_t i = 0; i < recv_count; i++)
+        {
+            if (!callback->pf_at_recv_parse[i])
+            {
+                RELEASE_SEND_FEEDBACK_SEMA(self);
+                AT_DEBUG_ERR("Transparent callback is NULL at index %u", i);
+                return AT_ERR_PARAM_INVALID;
+            }
+        }
+        
+        PRIV_DATA(self)->send_info.at_send_type = SEND_TRANSPARENT;
+        PRIV_DATA(self)->send_info.u.transparent_event.callback = *callback;
+        PRIV_DATA(self)->remain_receive_count = recv_count;
+    }
+    
+    /* Prepare data transmission */
+#if IS_ENABLE_SEND_BUF_PROTECTED
+    memcpy(PRIV_DATA(self)->send_buf, data, len);
+    UART_INTERFACE(self)->pf_uart_write(PRIV_DATA(self)->send_buf, len);
+#else
     UART_INTERFACE(self)->pf_uart_write(data, len);
+#endif
 
-    OS_IF(self)->pf_timer_start(PRIV_DATA(self)->timeout_timer, TRANSPARANT_TIMEOUT_TICK);
+    /* Send without response */
+    if(!callback || !callback->pf_at_recv_parse[0])
+    {
+        RELEASE_SEND_FEEDBACK_SEMA(self);
+        return AT_OK;
+    }   
+
+    TIMER_START(self, TRANSPARANT_TIMEOUT_TICK);    
     return AT_OK;
 }
 
@@ -282,27 +342,49 @@ static void at_parse_algo(uint8_t *const p_data, uint16_t data_len, void *arg)
         else
             AT_DEBUG_ERR("AT command parse callback is NULL at index %u", parse_algo_index);                
     }
-    else if(SEND_TRANSPARANT == send_info.at_send_type)
+    else if(SEND_TRANSPARENT == send_info.at_send_type)
     {
-        if(send_info.u.transparent_event.pf_at_recv_parse)
-            send_info.u.transparent_event.pf_at_recv_parse(p_data, data_len,\
-                             send_info.u.transparent_event.arg, send_info.u.transparent_event.holder);
+        timeout_tick = TRANSPARANT_TIMEOUT_TICK;
+        uint8_t parse_algo_index = send_info.u.transparent_event.callback.receive_count - PRIV_DATA(self)->remain_receive_count;
+        if(parse_algo_index >= send_info.u.transparent_event.callback.receive_count)
+        {
+            AT_DEBUG_ERR("Invalid transparent parse algorithm index: %u >= max_count=%u", parse_algo_index, send_info.u.transparent_event.callback.receive_count);
+            return;
+        }
+        if(send_info.u.transparent_event.callback.pf_at_recv_parse[parse_algo_index])
+            send_info.u.transparent_event.callback.pf_at_recv_parse[parse_algo_index](p_data, data_len,\
+                             send_info.u.transparent_event.callback.arg, send_info.u.transparent_event.callback.holder);
+        else
+            AT_DEBUG_ERR("Transparent parse callback is NULL at index %u", parse_algo_index);
     }
-    PRIV_DATA(self)->remain_receive_count --;
-    if((SEND_TRANSPARANT == send_info.at_send_type) || \
-       ((SEND_CMD == send_info.at_send_type) && \
-        (0 == PRIV_DATA(self)->remain_receive_count || \
-         PRIV_DATA(self)->remain_receive_count > MAX_RECV_CNT_OF_ONCE_SEND)))
+    if (PRIV_DATA(self)->remain_receive_count > 0)
+        PRIV_DATA(self)->remain_receive_count --;
+    AT_DEBUG_OUT("Recv remaining receive count: %u, len=%u", PRIV_DATA(self)->remain_receive_count, data_len);
+    if ((0 == PRIV_DATA(self)->remain_receive_count) ||
+        ((SEND_CMD == send_info.at_send_type) && 
+         (PRIV_DATA(self)->remain_receive_count > MAX_RECV_CNT_OF_CMD_SEND)) ||
+        ((SEND_TRANSPARENT == send_info.at_send_type) && 
+         (PRIV_DATA(self)->remain_receive_count > MAX_RECV_CNT_OF_TRANS_SEND)))
     {
-        OS_IF(self)->pf_timer_stop(PRIV_DATA(self)->timeout_timer, 0);
-        OS_IF(self)->pf_sema_give(PRIV_DATA(self)->send_feedback_sema_handle);
+        TIMER_STOP(self);
+        RELEASE_SEND_FEEDBACK_SEMA(self);
+        AT_DEBUG_OUT("AT command/transparent data reception completed" );
     }
-    else    
+    else
         /**
-         * If in SEND_CMD state and there are remaining receive counts,
+         * If there are remaining receive counts,
          * restart the timeout timer to receive next data.
          */
-        OS_IF(self)->pf_timer_start(PRIV_DATA(self)->timeout_timer, timeout_tick);   
+    {
+        if (0 != UP_OS_IF(self)->pf_os_queue_put(PRIV_DATA(self)->send_queue_handle, &send_info, 0))
+        {
+            AT_DEBUG_ERR("Failed to re-queue send info for next receive");
+            TIMER_STOP(self);
+            RELEASE_SEND_FEEDBACK_SEMA(self);
+            return;
+        }
+        TIMER_START(self, timeout_tick);
+    }
 }
 
 static void timeout_callback(void *timer_handle, void *arg)
@@ -317,7 +399,7 @@ static void timeout_callback(void *timer_handle, void *arg)
     }
         
     AT_DEBUG_ERR("AT response reception timeout");
-    OS_IF(self)->pf_sema_give(PRIV_DATA(self)->send_feedback_sema_handle);
+    RELEASE_SEND_FEEDBACK_SEMA(self);
 }
 
 /* Public Function Implementations -------------------------------------------*/
@@ -363,7 +445,7 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
     const at_cmd_set_t  *table = p_input_args->at_cmd_set_table->table;
     for(uint8_t i=0; i<table_length; i++)
     {
-        if(table[i].receive_count > MAX_RECV_CNT_OF_ONCE_SEND || table[i].receive_count < 1)
+        if(table[i].receive_count > MAX_RECV_CNT_OF_CMD_SEND || table[i].receive_count < 1)
             return AT_ERR_PARAM_INVALID;
         for(uint8_t j=0; j<table[i].receive_count; j++)
         {
@@ -425,7 +507,7 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
     UP_OS_IF(self)->pf_os_queue_create(1, sizeof(send_info_t), &PRIV_DATA(self)->send_queue_handle);
     OS_IF(self)->pf_timer_create(&PRIV_DATA(self)->timeout_timer, "at_timeout", AT_TIMEOUT_TICK,\
                                  0, timeout_callback, self);
-    OS_IF(self)->pf_sema_give(PRIV_DATA(self)->send_feedback_sema_handle);
+    RELEASE_SEND_FEEDBACK_SEMA(self);
 
     /* Mark handler as initialized and ready for use */
     PRIV_DATA(self)->is_inited = true;
@@ -460,7 +542,8 @@ void at_reset_send_state(at_handler_t *const self)
 {
     if (!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
         return;
-    OS_IF(self)->pf_sema_give(PRIV_DATA(self)->send_feedback_sema_handle);
+    RELEASE_SEND_FEEDBACK_SEMA(self);
     reset_rx_state(PRIV_DATA(self)->uart_proto_handle);
+    AT_DEBUG_OUT("AT handler send state reset");
 }
 
