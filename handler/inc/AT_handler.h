@@ -1,5 +1,5 @@
 /**
- * @file AT_handler.h
+ * @file at_handler.h
  * @brief AT Command Handler for WAPI Module (Header File)
  *
  * This header defines the core data structures, enumerations, macros, and public APIs
@@ -34,8 +34,14 @@ extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
     } while(0)
 
 
-#define AT_SEND_LEN_MAX                 128
-#define IS_ENABLE_SEND_BUF_PROTECTED    1/* always use in DMA Transmit */
+/**
+ * @def AT_CMD_LEN_MAX
+ * @brief Maximum length of AT command buffer (in bytes)
+ * 
+ * Defines the maximum size of the buffer used to format AT commands, 
+ * including variable parameters and termination characters (\r\n).
+ */
+#define AT_CMD_LEN_MAX                  128
 
 #define AT_TIMEOUT_TICK                 500
 #define TRANSPARANT_TIMEOUT_TICK        2000
@@ -71,20 +77,6 @@ typedef enum
 } at_status_t;
 
 typedef at_status_t (*pf_at_recv_parse_t)(uint8_t *buf, uint16_t len, void *arg, void *holder);
-
-/**
- * @struct at_trans_callback_t
- * @brief Encapsulates transparent send callback parameters
- * 
- * This structure bundles all callback-related parameters for transparent data transmission,
- * reducing function parameter count and improving code maintainability.
- */
-typedef struct
-{
-    pf_at_recv_parse_t pf_at_recv_parse; /* Response parsing callback function pointer */
-    void *arg;                            /* User-defined argument passed to callback */
-    void *holder;                         /* Holder context for callback */
-} at_trans_callback_t;
 
 /* ---------------- OSAL interface for AT handler (semaphore + timer) ---------------- */
 typedef struct
@@ -203,23 +195,13 @@ at_status_t at_inst(at_handler_t *const self,
                                     at_input_arg_t *const p_input_args);
 
 /* use AT_CMD_SEND without adding AT_CMD_END_MARKER manually */                                    
-/**
- * @brief Send an AT command with implementation details
- * 
- * @param self Pointer to the AT handler instance
- * @param at_func AT command function identifier (uint8_t value promoted to uint32_t due to variadic function)
- * @param ... Variable arguments to be passed to the AT command
- * 
- * @return AT command execution status
- */
-at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...);  
+at_status_t at_cmd_send_impl(at_handler_t *const self, uint8_t at_func, ...);  
 
 #define AT_CMD_SEND(self, at_func, ...)  \
     at_cmd_send_impl((self), (at_func), ##__VA_ARGS__, AT_CMD_END_MARKER)   
     
-/* transparant send with receive callback, callback = NULL means send without respond */
-at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_t len, 
-                          const at_trans_callback_t *callback); 
+/* transparant send with receive callback */
+at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_t len, pf_at_recv_parse_t pf_at_recv_parse, void *arg, void *holder); 
 
 /* call in IDLE ISR */
 void at_notify_recv_isr_cb(at_handler_t *const self);

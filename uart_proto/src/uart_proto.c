@@ -25,9 +25,17 @@
 /* -------------------------------------------------------------------------- */
 /*                           Convenience Macros                               */
 /* -------------------------------------------------------------------------- */
-#include <stdlib.h>
-#define MALLOC(size)            malloc(size) /* FreeRTOS memory allocation */
-#define FREE(ptr)               free(ptr)       
+#include "FreeRTOS.h"
+#define MALLOC(size) pvPortMalloc(size) /* FreeRTOS memory allocation */
+#define FREE(ptr)           \
+    do                      \
+    {                       \
+        if (ptr)            \
+        {                   \
+            vPortFree(ptr); \
+            ptr = NULL;     \
+        }                   \
+    } while (0) /* Safe memory free */
 
 #define OS_INTERFACE(p)         (p)->uart_proto_input_arg->os_interface
 #define UART_INTERFACE(p)       (p)->uart_proto_input_arg->uart_ops

@@ -33,7 +33,7 @@
 #endif
 
 #define WAPI_THREAD_PRIORITY            24
-#define WAPI_THREAD_STACK_SIZE          2048//1024
+#define WAPI_THREAD_STACK_SIZE          1024
 
 #include "SEGGER_RTT.h"
 extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
@@ -69,7 +69,7 @@ typedef enum
 /* ---------------- OSAL interface for M0804C handler ---------------- */
 typedef struct
 {
-    void (*pf_os_delay_ms)(uint32_t ms);
+    void (*pf_os_delay)(int32_t ticks);
 } m0804c_os_interface_t;
 
 typedef struct

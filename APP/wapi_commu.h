@@ -2,8 +2,10 @@
 #define __WAPI_COMMU_H__
 
 #include "WAPI_M0804C.h"
-#include "osal.h"
+#include "cmsis_os2.h"
 #include "upper_commu.h"
+#include "usart.h"
+#include "gpio.h"
 
 
 
@@ -20,9 +22,6 @@ extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
         SEGGER_RTT_WriteString(0, RTT_CTRL_RESET "\r\n");     /* Reset format and add newline at the end */ \
     } while(0)
 
-#define WAPI_COMMU_PARSE_THREAD_STACK_DEPTH        2048
-#define WAPI_COMMU_PARSE_THREAD_PRIORITY           24 /* WAPI_COMMU_PARSE_THREAD_PRIORITY must higher than UPP_COMMU_PARSE_THREAD_PRIORITY */
-    
 void wapi_commu_init(void);   
 
 #endif /* __WAPI_COMMU_H__ */
