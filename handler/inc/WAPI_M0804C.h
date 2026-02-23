@@ -157,10 +157,10 @@ wapi_status_t m0804c_use_cert_conn(m0804c_handler_t *const self);
 #if IS_USE_CONN_BY_PWD
 wapi_status_t m0804c_use_pwd_conn(m0804c_handler_t *const self);
 #endif
+/* recv_parse_cb = NULL means send without response */
 wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t length,\
                          pf_at_recv_parse_t recv_parse_cb);
-wapi_status_t m0804c_send_without_response(m0804c_handler_t *const self, uint8_t *buf,\
-                         uint16_t length);
+                         
 wapi_status_t m0804c_cert_upload(m0804c_handler_t *const self);
 
 /* return true when valid, others invalid */

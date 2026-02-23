@@ -90,6 +90,8 @@ typedef struct at_priv_data
     bool is_inited; /* Initialization flag: true = handler ready, false = uninitialized */
     uint8_t remain_receive_count;
     send_info_t send_info;
+    pf_at_recv_parse_t recv_hook;
+    void *recv_hook_arg;
     uart_proto_t *uart_proto_handle;
     void *send_feedback_sema_handle;
     void *send_queue_handle;
@@ -202,7 +204,8 @@ at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...)
 
     if (actual_param_count != expected_param_count)
     {
-        AT_DEBUG_ERR("AT command parameter count mismatch: expected=%u, actual=%u", expected_param_count, actual_param_count);
+        AT_DEBUG_ERR("AT command parameter count mismatch: at_func=%u, expected=%u, actual=%u",\
+                         at_func, expected_param_count, actual_param_count);
         return AT_ERR_PARAM_INVALID;  /* Mismatch between expected/actual arguments */
     }
     /* Format AT command string with variadic arguments */
@@ -225,7 +228,7 @@ at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...)
         
     PRIV_DATA(self)->send_info.at_send_type = SEND_CMD;
     PRIV_DATA(self)->send_info.u.cmd_event.cmd_entry = cmd_entry;
-    PRIV_DATA(self)->remain_receive_count = cmd_entry->receive_count;
+    PRIV_DATA(self)->remain_receive_count = cmd_entry->recv_callbacks.count;
     AT_DEBUG_OUT("Send remaining receive count: %u", PRIV_DATA(self)->remain_receive_count);
 
     /* Transmit formatted command via UART (hardware-agnostic callback) */
@@ -249,9 +252,9 @@ at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_
     }
     
     /* Send with response - setup transparent event */
-    if(callback && callback->pf_at_recv_parse[0])
+    if(callback && callback->recv_callbacks.items[0].pf_recv_parse)
     {
-        uint8_t recv_count = callback->receive_count ? callback->receive_count : 1;
+        uint8_t recv_count = callback->recv_callbacks.count ? callback->recv_callbacks.count : 1;
         if (recv_count > MAX_RECV_CNT_OF_TRANS_SEND)
         {
             RELEASE_SEND_FEEDBACK_SEMA(self);
@@ -260,9 +263,9 @@ at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_
         }
         
         /* Validate all callback function pointers up to recv_count */
-        for (uint8_t i = 0; i < recv_count; i++)
+        for (uint8_t i = 1; i < recv_count; i++)
         {
-            if (!callback->pf_at_recv_parse[i])
+            if (!callback->recv_callbacks.items[i].pf_recv_parse)
             {
                 RELEASE_SEND_FEEDBACK_SEMA(self);
                 AT_DEBUG_ERR("Transparent callback is NULL at index %u", i);
@@ -284,7 +287,7 @@ at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_
 #endif
 
     /* Send without response */
-    if(!callback || !callback->pf_at_recv_parse[0])
+    if(!callback || !callback->recv_callbacks.items[0].pf_recv_parse)
     {
         RELEASE_SEND_FEEDBACK_SEMA(self);
         return AT_OK;
@@ -320,7 +323,12 @@ static void at_parse_algo(uint8_t *const p_data, uint16_t data_len, void *arg)
         return;
     send_info_t send_info;
     AT_DEBUG_STRING(p_data, data_len);
-    if (0 != UP_OS_IF(self)->pf_os_queue_get(PRIV_DATA(self)->send_queue_handle, &send_info, 0))
+
+    if (PRIV_DATA(self)->recv_hook)
+    {
+        PRIV_DATA(self)->recv_hook(p_data, data_len, PRIV_DATA(self)->recv_hook_arg, self);
+    }
+    else if (0 != UP_OS_IF(self)->pf_os_queue_get(PRIV_DATA(self)->send_queue_handle, &send_info, 0))
     {
         AT_DEBUG_ERR("Received data but no corresponding send info in queue");  
         return;  
@@ -330,30 +338,31 @@ static void at_parse_algo(uint8_t *const p_data, uint16_t data_len, void *arg)
     if(SEND_CMD == send_info.at_send_type)    
     {
         const at_cmd_set_t *cmd_entry = send_info.u.cmd_event.cmd_entry;
-        uint8_t parse_algo_index = cmd_entry->receive_count - PRIV_DATA(self)->remain_receive_count;
-        if(parse_algo_index > cmd_entry->receive_count)
+        uint8_t parse_algo_index = cmd_entry->recv_callbacks.count - PRIV_DATA(self)->remain_receive_count;
+        if(parse_algo_index >= cmd_entry->recv_callbacks.count)
         {
-            AT_DEBUG_ERR("Invalid parse algorithm index: %u > max_count=%u", parse_algo_index, cmd_entry->receive_count);
+            AT_DEBUG_ERR("Invalid parse algorithm index: %u >= max_count=%u", parse_algo_index, cmd_entry->recv_callbacks.count);
             return;
         }            
-        if(cmd_entry->pf_at_recv_parse[parse_algo_index])
-            cmd_entry->pf_at_recv_parse[parse_algo_index](p_data, data_len,\
-                                 cmd_entry->arg, self->at_input_arg->at_cmd_set_table->holder);
+        if(cmd_entry->recv_callbacks.items[parse_algo_index].pf_recv_parse)
+            cmd_entry->recv_callbacks.items[parse_algo_index].pf_recv_parse(p_data, data_len,\
+                                 cmd_entry->recv_callbacks.items[parse_algo_index].arg, self->at_input_arg->at_cmd_set_table->holder);
         else
             AT_DEBUG_ERR("AT command parse callback is NULL at index %u", parse_algo_index);                
     }
     else if(SEND_TRANSPARENT == send_info.at_send_type)
     {
         timeout_tick = TRANSPARANT_TIMEOUT_TICK;
-        uint8_t parse_algo_index = send_info.u.transparent_event.callback.receive_count - PRIV_DATA(self)->remain_receive_count;
-        if(parse_algo_index >= send_info.u.transparent_event.callback.receive_count)
+        uint8_t parse_algo_index = send_info.u.transparent_event.callback.recv_callbacks.count - PRIV_DATA(self)->remain_receive_count;
+        if(parse_algo_index >= send_info.u.transparent_event.callback.recv_callbacks.count)
         {
-            AT_DEBUG_ERR("Invalid transparent parse algorithm index: %u >= max_count=%u", parse_algo_index, send_info.u.transparent_event.callback.receive_count);
+            AT_DEBUG_ERR("Invalid transparent parse algorithm index: %u >= max_count=%u", parse_algo_index, send_info.u.transparent_event.callback.recv_callbacks.count);
             return;
         }
-        if(send_info.u.transparent_event.callback.pf_at_recv_parse[parse_algo_index])
-            send_info.u.transparent_event.callback.pf_at_recv_parse[parse_algo_index](p_data, data_len,\
-                             send_info.u.transparent_event.callback.arg, send_info.u.transparent_event.callback.holder);
+        if(send_info.u.transparent_event.callback.recv_callbacks.items[parse_algo_index].pf_recv_parse)
+            send_info.u.transparent_event.callback.recv_callbacks.items[parse_algo_index].pf_recv_parse(p_data, data_len,\
+                             send_info.u.transparent_event.callback.recv_callbacks.items[parse_algo_index].arg,
+                             send_info.u.transparent_event.callback.holder);
         else
             AT_DEBUG_ERR("Transparent parse callback is NULL at index %u", parse_algo_index);
     }
@@ -445,16 +454,14 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
     const at_cmd_set_t  *table = p_input_args->at_cmd_set_table->table;
     for(uint8_t i=0; i<table_length; i++)
     {
-        if(table[i].receive_count > MAX_RECV_CNT_OF_CMD_SEND || table[i].receive_count < 1)
+        if(table[i].recv_callbacks.count > MAX_RECV_CNT_OF_CMD_SEND || table[i].recv_callbacks.count < 1)
             return AT_ERR_PARAM_INVALID;
-        for(uint8_t j=0; j<table[i].receive_count; j++)
+        for(uint8_t j=0; j<table[i].recv_callbacks.count; j++)
         {
-            if(!table[i].pf_at_recv_parse[j])
+            if(!table[i].recv_callbacks.items[j].pf_recv_parse)
                 return AT_ERR_PARAM_INVALID;    
         }
     }
-
-    /* Bind initialization arguments to handler instance */
     self->at_input_arg = p_input_args;
 
     /* Allocate private runtime data (FreeRTOS thread-safe malloc) */
@@ -464,6 +471,8 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
         return AT_ERR_OTHERS;
     }
     PRIV_DATA(self)->is_inited = false; /* Mark as uninitialized during setup */
+    PRIV_DATA(self)->recv_hook = NULL;
+    PRIV_DATA(self)->recv_hook_arg = NULL;
     
     parse_algo_t *algo = self->at_input_arg->uart_proto_input_arg->frame_parse_att->parse_algo;
     if (algo)
@@ -513,6 +522,26 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
     PRIV_DATA(self)->is_inited = true;
 
     AT_DEBUG_OUT("AT handler initialized successfully");
+    return AT_OK;
+}
+
+at_status_t at_recv_hook_register(at_handler_t *const self, pf_at_recv_parse_t hook, void *arg)
+{
+    if (!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited || !hook)
+        return AT_ERR_PARAM_INVALID;
+
+    PRIV_DATA(self)->recv_hook = hook;
+    PRIV_DATA(self)->recv_hook_arg = arg;
+    return AT_OK;
+}
+
+at_status_t at_recv_hook_unregister(at_handler_t *const self)
+{
+    if (!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
+        return AT_ERR_PARAM_INVALID;
+
+    PRIV_DATA(self)->recv_hook = NULL;
+    PRIV_DATA(self)->recv_hook_arg = NULL;
     return AT_OK;
 }
 

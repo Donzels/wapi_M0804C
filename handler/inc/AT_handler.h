@@ -71,7 +71,50 @@ typedef enum
     AT_ERR_OTHERS             /* Unspecified error (e.g., UART transmission failure) */
 } at_status_t;
 
-typedef at_status_t (*pf_at_recv_parse_t)(uint8_t *buf, uint16_t len, void *arg, void *holder);
+typedef void (*pf_at_recv_parse_t)(uint8_t *buf, uint16_t len, void *arg, void *holder);
+
+/**
+ * @struct at_recv_callback_item_t
+ * @brief Callback function and argument pair (First-level encapsulation)
+ * 
+ * Encapsulates a single callback function with its corresponding argument,
+ * ensuring they are always paired together and reducing index mismatch errors.
+ */
+typedef struct
+{
+    pf_at_recv_parse_t  pf_recv_parse;  /* Receive parsing callback function */
+    void                *arg;            /* User-defined argument passed to the callback */
+} at_recv_callback_item_t;
+
+/**
+ * @brief Macro to define a receive callback set type
+ *
+ * Generates a struct type with a fixed-size callback array and a count field.
+ */
+#define AT_DEFINE_RECV_CALLBACK_SET(name, max_count)            \
+    typedef struct                                               \
+    {                                                            \
+        at_recv_callback_item_t items[(max_count)];              \
+        uint8_t                 count;                           \
+    } name
+
+/**
+ * @struct at_cmd_recv_callback_set_t
+ * @brief Callback set for AT command responses
+ *
+ * Encapsulates multiple callback items with their count for AT command responses.
+ * Uses MAX_RECV_CNT_OF_CMD_SEND as the maximum count.
+ */
+AT_DEFINE_RECV_CALLBACK_SET(at_cmd_recv_callback_set_t, MAX_RECV_CNT_OF_CMD_SEND);
+
+/**
+ * @struct at_trans_recv_callback_set_t
+ * @brief Callback set for transparent transmission
+ *
+ * Encapsulates multiple callback items with their count for transparent data transmission.
+ * Uses MAX_RECV_CNT_OF_TRANS_SEND as the maximum count.
+ */
+AT_DEFINE_RECV_CALLBACK_SET(at_trans_recv_callback_set_t, MAX_RECV_CNT_OF_TRANS_SEND);
 
 /**
  * @struct at_trans_callback_t
@@ -82,10 +125,8 @@ typedef at_status_t (*pf_at_recv_parse_t)(uint8_t *buf, uint16_t len, void *arg,
  */
 typedef struct
 {
-    pf_at_recv_parse_t pf_at_recv_parse[MAX_RECV_CNT_OF_TRANS_SEND]; /* Response parsing callback function pointer array */
-    void *arg;                            /* User-defined argument passed to callback */
-    void *holder;                         /* Holder context for callback */
-    uint8_t receive_count;                /* Number of response callbacks expected (0 = default 1) */
+    at_trans_recv_callback_set_t  recv_callbacks; /* Receive callback set for transparent transmission */
+    void                          *holder;        /* Holder context for callback */
 } at_trans_callback_t;
 
 /* ---------------- OSAL interface for AT handler (semaphore + timer) ---------------- */
@@ -108,15 +149,15 @@ typedef struct
  * @brief AT command table entry structure
  * 
  * Represents a single entry in the AT command lookup table, mapping an AT function ID
- * to its command string template and expected response string.
+ * to its command string template and expected response callbacks.
+ * 
+ * Note: recv_callbacks.count must <= MAX_RECV_CNT_OF_CMD_SEND
  */
 typedef struct
 {
-    uint8_t     at_func;      /* Unique ID for the AT command function (e.g., TEST=0, WAPI_CONN=2) */
-    char        *send;        /* AT command string template (supports %s placeholders for variables) */    
-    uint8_t     receive_count;       /* must <= MAX_RECV_CNT_OF_CMD_SEND */
-    pf_at_recv_parse_t pf_at_recv_parse[MAX_RECV_CNT_OF_CMD_SEND];
-    void        *arg;         /* User context passed to parse algo callbacks */
+    uint8_t                     at_func;        /* Unique ID for the AT command function (e.g., TEST=0, WAPI_CONN=2) */
+    char                        *send;          /* AT command string template (supports %s placeholders for variables) */    
+    at_cmd_recv_callback_set_t  recv_callbacks; /* Receive callback set for AT command responses */
 }at_cmd_set_t;
 
 /**
@@ -176,18 +217,6 @@ typedef struct at_handler
 {
     at_input_arg_t  *at_input_arg;  /* Pointer to initialization input arguments (public config) */
     at_priv_data_t  *at_priv_data;  /* Pointer to private handler data (internal state) */
-    /**
-     * @brief AT command send function pointer (variadic arguments)
-     * 
-     * Sends an AT command to the WAPI module with variable parameters, validates input,
-     * formats the command string, and transmits via UART.
-     * @param self      Pointer to at_handler_t instance
-     * @param at_func   AT command function ID (matches command table entry)
-     * @param ...       Variable arguments (matches %s placeholders in command template)
-     * @note Final argument must be AT_CMD_END_MARKER (automatically added by AT_CMD_SEND macro)
-     * @return at_status_t Operation status code
-     */
-    // at_status_t (*pf_at_cmd_send)(at_handler_t *const self, uint8_t at_func, ...);
 } at_handler_t;
 
 /**
@@ -222,6 +251,30 @@ at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...);
 /* transparant send with receive callback, callback = NULL means send without respond */
 at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_t len, 
                           const at_trans_callback_t *callback); 
+                     
+/**
+ * @brief Register a raw receive hook callback
+ *
+ * This callback is invoked on every received frame before the normal
+ * AT parse logic is executed. Useful for handling unsolicited data.
+ *
+ * @param self Pointer to the AT handler instance
+ * @param hook Callback function pointer (NULL is invalid)
+ * @param arg  User argument passed to the hook
+ * @return at_status_t Operation status
+ * @note The holder parameter passed to the hook will be the AT handler instance itself
+ */
+at_status_t at_recv_hook_register(at_handler_t *const self, pf_at_recv_parse_t hook, void *arg);
+
+/**
+ * @brief Unregister the raw receive hook callback
+ *
+ * After unregistering, no raw receive hook will be called.
+ *
+ * @param self Pointer to the AT handler instance
+ * @return at_status_t Operation status
+ */
+at_status_t at_recv_hook_unregister(at_handler_t *const self);
 
 /* call in IDLE ISR */
 void at_notify_recv_isr_cb(at_handler_t *const self);

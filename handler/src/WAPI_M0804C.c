@@ -121,13 +121,13 @@ typedef struct m0804c_priv_data
  * Forward Declarations
  * ============================================================================ */
 /* AT parsing functions */
-static at_status_t at_recv_parse_ok(uint8_t *buf, uint16_t len, void *arg, void *holder);
-static at_status_t at_recv_parse_tcp_connect(uint8_t *buf, uint16_t len, void *arg, void *holder);
-static at_status_t at_recv_parse_reboot(uint8_t *buf, uint16_t len, void *arg, void *holder);
-static at_status_t at_recv_parse_upload_cert_start(uint8_t *buf, uint16_t len, void *arg, void *holder);
-static at_status_t at_recv_parse_link_layer_check(uint8_t *buf, uint16_t len, void *arg, void *holder);
-static at_status_t recv_force_correct(uint8_t *buf, uint16_t len, void *arg, void *holder);
-static at_status_t check_connect(uint8_t *buf, uint16_t len, void *arg, void *holder);
+static void at_recv_parse_ok(uint8_t *buf, uint16_t len, void *arg, void *holder);
+static void at_recv_parse_tcp_connect(uint8_t *buf, uint16_t len, void *arg, void *holder);
+static void at_recv_parse_reboot(uint8_t *buf, uint16_t len, void *arg, void *holder);
+static void at_recv_parse_upload_cert_start(uint8_t *buf, uint16_t len, void *arg, void *holder);
+static void at_recv_parse_link_layer_check(uint8_t *buf, uint16_t len, void *arg, void *holder);
+static void recv_force_correct(uint8_t *buf, uint16_t len, void *arg, void *holder);
+static void check_connect(uint8_t *buf, uint16_t len, void *arg, void *holder);
 
 /* WAPI operation functions */
 static void wapi_test(m0804c_handler_t *const self);
@@ -211,24 +211,24 @@ extern recv_buf_att_t g_wapi_uart_rx_buf;
 
 static const at_cmd_set_t m0804c_at_table[] = 
 {
-    {TEST, "AT\r\n", 1, {at_recv_parse_ok}, NULL},
-    {GET_VERSION, "ATI\r\n", 1, {at_recv_parse_ok}, NULL},
-    {SET_ECHO, "AT+ECHO=%d\r\n", 1, {at_recv_parse_ok}, NULL},
-    {SET_BAND, "AT+BAND=%d\r\n", 1, {at_recv_parse_ok}, NULL},
-    {AT_REBOOT, "AT+REBOOT\r\n", 1, {at_recv_parse_reboot}, NULL},
-    {SET_TX_PWR, "AT+TXPWR=0,22\r\n", 1, {at_recv_parse_ok}, NULL},
-    {SET_LOW_PWR, "AT+SETDP=%d\r\n", 1, {at_recv_parse_ok}, NULL},
-    {DISCONN_TRANS, "AT+WSDISCNCT\r\n", 1, {at_recv_parse_ok}, NULL},
-    {SET_IP, "AT+WFIXIP=%d,%d.%d.%d.%d,%d.%d.%d.%d,%d.%d.%d.%d\r\n", 1, {at_recv_parse_ok}, NULL},
-    {CONN_WAPI_BY_CERT, "AT+WAPICT,%d,%s\r\n", 1, {at_recv_parse_ok}, NULL},
-    {CONN_WAPI_BY_PWD, "AT+WAPICT,%d,%s,%s\r\n", 1, {at_recv_parse_ok}, NULL},
-    {CHECK_LINK_LAYER, "AT+WAPICT=?\r\n", 1, {at_recv_parse_link_layer_check}, NULL},
-    {TCP_UDP_CONN, "AT+NCRECLNT=%s,%d.%d.%d.%d,%d,%d,%d,%d,%d,%d,%d\r\n", 1, {at_recv_parse_tcp_connect}, NULL},
-    {RECV_DATA, "AT+NRECV,%d,%d,%d\r\n", 1, {at_recv_parse_ok}, NULL},
-    {SEND_DATA, "AT+NSEND,%d,%d,", 1, {at_recv_parse_ok}, NULL},
-    {UPLOAD_CERT_START, "AT+UPCERT=%s\r\n", 1, {at_recv_parse_upload_cert_start}, NULL},
-    {CHECK_CERT, "AT+UPCERT=?\r\n", 1, {at_recv_parse_ok}, NULL},
-    {DISCONN_SOCKET, "AT+NSTOP,%d\r\n", 1, {at_recv_parse_ok}, NULL},
+    {TEST, "AT\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {GET_VERSION, "ATI\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {SET_ECHO, "AT+ECHO=%d\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {SET_BAND, "AT+BAND=%d\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {AT_REBOOT, "AT+REBOOT\r\n", {.items = {{at_recv_parse_reboot, NULL}}, .count = 1}},
+    {SET_TX_PWR, "AT+TXPWR=0,22\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {SET_LOW_PWR, "AT+SETDP=%d\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {DISCONN_TRANS, "AT+WSDISCNCT\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {SET_IP, "AT+WFIXIP=%d,%d.%d.%d.%d,%d.%d.%d.%d,%d.%d.%d.%d\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {CONN_WAPI_BY_CERT, "AT+WAPICT,%d,%s\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {CONN_WAPI_BY_PWD, "AT+WAPICT,%d,%s,%s\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {CHECK_LINK_LAYER, "AT+WAPICT=?\r\n", {.items = {{at_recv_parse_link_layer_check, NULL}}, .count = 1}},
+    {TCP_UDP_CONN, "AT+NCRECLNT=%s,%d.%d.%d.%d,%d,%d,%d,%d,%d,%d,%d\r\n", {.items = {{at_recv_parse_tcp_connect, NULL}}, .count = 1}},
+    {RECV_DATA, "AT+NRECV,%d,%d,%d\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {SEND_DATA, "AT+NSEND,%d,%d,", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {UPLOAD_CERT_START, "AT+UPCERT=%s\r\n", {.items = {{at_recv_parse_upload_cert_start, NULL}}, .count = 1}},
+    {CHECK_CERT, "AT+UPCERT=?\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
+    {DISCONN_SOCKET, "AT+NSTOP,%d\r\n", {.items = {{at_recv_parse_ok, NULL}}, .count = 1}},
 };
 
 static at_cmd_set_table_t g_m0804c_at_cmd_set_table = 
@@ -335,7 +335,7 @@ static wapi_process_callbacks_t conn_callbacks = {
 static void wapi_process_complete_cb(m0804c_handler_t *const self,\
                                      uint8_t index, process_status_t process_status)
 {      
-    if(process_status != 0)  
+    if(PROCESS_OK != process_status)  
     {
         WAPI_DEBUG_ERR("Process %u failed", index);
     }         
@@ -417,6 +417,7 @@ static void conn_process_retry(m0804c_handler_t *self)
 static void conn_process_success(m0804c_handler_t *self)
 {
     PRIV_DATA(self)->trans_send_flag = true;
+    at_recv_hook_register(self, check_connect, NULL);
     // m0804c_start_recv(self);
 }
 
@@ -448,15 +449,14 @@ static int16_t find_substring_in_buffer(uint8_t *buf, uint16_t len, const char* 
  * AT Parsing Functions
  * ============================================================================ */
 
-static at_status_t at_recv_parse_base(uint8_t *buf, uint16_t len, const char* string, void *arg)
+static void at_recv_parse_base(uint8_t *buf, uint16_t len, const char* string, void *arg)
 {
     m0804c_handler_t *self = (m0804c_handler_t *)arg;
     if (!self)
-        return AT_ERR_PARAM_INVALID;
+        return;
     
     // WAPI_DEBUG_STRING(buf, len);
     
-    at_status_t ret;
     wapi_recv_state_t wapi_recv_state = {.is_success = false};
     int32_t stat;
     uint16_t string_len;
@@ -466,7 +466,6 @@ static at_status_t at_recv_parse_base(uint8_t *buf, uint16_t len, const char* st
     if(!buf || !string)
     {
         WAPI_DEBUG_ERR("Invalid parameter: buf or string is NULL");
-        ret = AT_ERR_PARAM_INVALID; 
         goto exit;
     }
     
@@ -475,7 +474,6 @@ static at_status_t at_recv_parse_base(uint8_t *buf, uint16_t len, const char* st
     if (0 == string_len || len < string_len)
     {
         WAPI_DEBUG_ERR("Length mismatch: buf_len=%u, pattern_len=%u", len, string_len);
-        ret = AT_ERR_RECV_NOT_MATCH; 
         goto exit;
     }
 
@@ -488,78 +486,72 @@ static at_status_t at_recv_parse_base(uint8_t *buf, uint16_t len, const char* st
         if(0 != stat)
         {
             WAPI_DEBUG_ERR("Queue put failed (stat=%d)", stat);
-            return AT_ERR_OTHERS;     
         }           
-        return AT_OK; /* Found substring, match successful */
+        return; /* Found substring, match successful */
     }
 
     /* Traversal complete, substring not found */
     WAPI_DEBUG_ERR("Pattern not found in buffer");
-    ret = AT_ERR_RECV_NOT_MATCH;      
     
     exit:        
         stat = UP_OS(self)->pf_os_queue_put(PRIV_DATA(self)->recv_state_queue_handle, &wapi_recv_state, 0);   
         if(0 != stat)
         {
             WAPI_DEBUG_ERR("Failed to put state in queue (stat=%d)", stat);
-            return AT_ERR_OTHERS;     
         }   
-        return ret; 
+        return; 
 
 }
 
-static at_status_t at_recv_parse_ok(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void at_recv_parse_ok(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
-    return at_recv_parse_base(buf, len, "+OK", holder);    
+    at_recv_parse_base(buf, len, "+OK", holder);    
 }
 
-static at_status_t at_recv_parse_tcp_connect(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void at_recv_parse_tcp_connect(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
-    return at_recv_parse_base(buf, len, "tcp alive", holder);    
+    at_recv_parse_base(buf, len, "tcp alive", holder);    
 }
 
-static at_status_t at_recv_parse_reboot(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void at_recv_parse_reboot(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
-    return at_recv_parse_base(buf, len, "Chip re", holder);    
+    at_recv_parse_base(buf, len, "Chip re", holder);    
 }
 
-static at_status_t at_recv_parse_upload_cert_start(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void at_recv_parse_upload_cert_start(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
-    return at_recv_parse_base(buf, len, "Start recv", holder);/* for upload */
+    at_recv_parse_base(buf, len, "Start recv", holder);/* for upload */
 }
 
-static at_status_t at_recv_parse_link_layer_check(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void at_recv_parse_link_layer_check(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
-    return at_recv_parse_base(buf, len, "WAPI STATUS IS 1", holder);    
+    at_recv_parse_base(buf, len, "WAPI STATUS IS 1", holder);    
 }
 
-static at_status_t recv_force_correct(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void recv_force_correct(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
     m0804c_handler_t *self = (m0804c_handler_t *)holder;
     if (!self)
-        return AT_ERR_PARAM_INVALID;
+        return;
     /* receive dummy data, so directly return OK  */
     wapi_recv_state_t wapi_recv_state = {.is_success = true};
     UP_OS(self)->pf_os_queue_put(PRIV_DATA(self)->recv_state_queue_handle, &wapi_recv_state, 0);
-    return AT_OK;   
 }
 
-static at_status_t sync_multi_send(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void sync_multi_send(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
     m0804c_handler_t *self = (m0804c_handler_t *)holder;
     if (!self)
-        return AT_ERR_PARAM_INVALID;
+        return;
     at_reset_send_state(PRIV_DATA(self)->at_handler);
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->multi_send_syn_sema_handle);
-    return AT_OK;   
 }
 
-static at_status_t multi_send_complete_cb(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void multi_send_complete_cb(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {    
     sync_multi_send(buf, len, arg, holder);
     recv_force_correct(buf, len, arg, holder);
     // at_recv_parse_ok(buf, len, arg, holder);
-    return AT_OK;   
 }
 
 static at_status_t multi_send_recv_timeout(void *arg)
@@ -722,28 +714,26 @@ static void reset_wapi_state(m0804c_handler_t *self)
     at_reset_send_state(wapi_get_at_handler(self));    
 }
 
-static at_status_t check_connect(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void check_connect(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {            
     m0804c_handler_t *self = (m0804c_handler_t *)holder;
     if (!self)
-        return AT_ERR_PARAM_INVALID;
-
-    pf_at_recv_parse_t recv_parse_cb = (pf_at_recv_parse_t)arg;
-    
+        return;
+   
     char string[] = "[ERR] Socket not in use!";
     
     /* Basic parameter validation (null pointer/invalid length) */
     if(!buf)
     {
         WAPI_DEBUG_ERR("Invalid parameter: buf is NULL");
-        return AT_ERR_PARAM_INVALID;
+        return;
     }
     
     /* Boundary check: substring length is 0 or longer than buf ¡ú impossible to contain */
     uint16_t string_len = strlen(string);
     if (0 == string_len || len < string_len)
     {
-        return AT_ERR_RECV_NOT_MATCH;
+        return;
     }
 
     if (find_substring_in_buffer(buf, len, string) >= 0)
@@ -759,26 +749,19 @@ static at_status_t check_connect(uint8_t *buf, uint16_t len, void *arg, void *ho
         if(CONN_BY_PWD == PRIV_DATA(self)->wapi_conn_mode)
             m0804c_use_pwd_conn(self);
 #endif
-        return AT_ERR_OTHERS; /* Found substring, match successful */
+        return; /* Found substring, match successful */
     }
-    return AT_OK;
 }
 
-static at_status_t send_recv_cb(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void send_recv_cb(uint8_t *buf, uint16_t len, void *arg, void *holder)
 {            
     m0804c_handler_t *self = (m0804c_handler_t *)holder;
     if (!self)
-        return AT_ERR_PARAM_INVALID;
-    at_status_t status = check_connect(buf, len, arg, holder);/* check if socket error occurs during send/recv */
-    if(status != AT_OK)
-    {
-        return status;
-    }
+        return;
     pf_at_recv_parse_t recv_parse_cb = (pf_at_recv_parse_t)arg;   
     /* Traversal complete, substring not found */
     if (recv_parse_cb)
-        return recv_parse_cb(buf, len, NULL, holder);
-    return AT_ERR_RECV_NOT_MATCH;
+        recv_parse_cb(buf, len, NULL, holder);
 }
 
 static wapi_status_t wapi_send_data(m0804c_handler_t *self, uint8_t *buf, uint16_t length,
@@ -810,10 +793,11 @@ static wapi_status_t wapi_send_data(m0804c_handler_t *self, uint8_t *buf, uint16
     PRIV_DATA(self)->wapi_send_buf[total_len - 1] = '\n';
     
     at_trans_callback_t callback = {
-        .pf_at_recv_parse = {check_connect, send_recv_cb},
-        .arg = (void *)recv_parse_cb,
-        .holder = (void *)self,
-        .receive_count = 2
+        .recv_callbacks = {
+            .items = {{at_recv_parse_ok, NULL}, {send_recv_cb, (void *)recv_parse_cb}},
+            .count = 2
+        },
+        .holder = (void *)self
     };
     at_status_t status = at_trans_send(wapi_get_at_handler(self), PRIV_DATA(self)->wapi_send_buf,
                                          total_len, &callback);
@@ -848,10 +832,11 @@ static wapi_status_t wapi_send_data_without_response(m0804c_handler_t *self, uin
     PRIV_DATA(self)->wapi_send_buf[total_len - 1] = '\n';
     
     at_trans_callback_t callback = {
-        .pf_at_recv_parse = {check_connect},
-        .arg = NULL,
-        .holder = (void *)self,
-        .receive_count = 1
+        .recv_callbacks = {
+            .items = {{at_recv_parse_ok, NULL}},
+            .count = 1
+        },
+        .holder = (void *)self
     };
     at_status_t status = at_trans_send(wapi_get_at_handler(self), PRIV_DATA(self)->wapi_send_buf,
                                          total_len, &callback);
@@ -891,10 +876,11 @@ static void wapi_upload_cert_file_common(m0804c_handler_t *self, file_att_t *fil
         if(0 == stat)
         {
             at_trans_callback_t callback = {
-                .pf_at_recv_parse = {pf_at_recv_parse},
-                .arg = NULL,
-                .holder = (void *)self,
-                .receive_count = 1
+                .recv_callbacks = {
+                    .items = {{pf_at_recv_parse, NULL}},
+                    .count = 1
+                },
+                .holder = (void *)self
             };
             at_trans_send(wapi_get_at_handler(self), file->file_payload + offset, send_len,
                              &callback);  
@@ -1160,10 +1146,11 @@ static wapi_status_t m0804c_start_recv(m0804c_handler_t *const self)
     char send_buf[32] = {0};
     int total_len = sprintf(send_buf, "AT+NRECV,%d,1,1\r\n", CUR_SOCKET);
     at_trans_callback_t callback = {
-        .pf_at_recv_parse = {check_connect},
-        .arg = NULL,
-        .holder = (void *)self,
-        .receive_count = 1
+        .recv_callbacks = {
+            .items = {{at_recv_parse_ok, NULL}},
+            .count = 1
+        },
+        .holder = (void *)self
     };
     at_status_t status = at_trans_send(wapi_get_at_handler(self), (uint8_t *)send_buf,
                                          total_len, &callback);
@@ -1372,6 +1359,7 @@ wapi_status_t m0804c_init(m0804c_handler_t *const self)
 {
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
         return WAPI_ERR_HANDLER_NOT_READY;
+    at_recv_hook_unregister(self);
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->init_start_sema_handle);    
     return WAPI_OK;
 }
@@ -1381,6 +1369,7 @@ wapi_status_t m0804c_use_cert_conn(m0804c_handler_t *const self)
 
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
         return WAPI_ERR_HANDLER_NOT_READY;
+    at_recv_hook_unregister(self);    
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->use_cert_sema_handle);    
     return WAPI_OK;
 }
@@ -1392,6 +1381,7 @@ wapi_status_t m0804c_use_pwd_conn(m0804c_handler_t *const self)
 
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
         return WAPI_ERR_HANDLER_NOT_READY;
+    at_recv_hook_unregister(self);
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->use_pwd_sema_handle);    
     return WAPI_OK;
 }
@@ -1403,24 +1393,16 @@ wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t l
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
         return WAPI_ERR_HANDLER_NOT_READY;
 
-    if(PRIV_DATA(self)->trans_send_flag)    
-        return wapi_send_data(self, buf, length, recv_parse_cb);
+    if(PRIV_DATA(self)->trans_send_flag) 
+    {
+        if(recv_parse_cb)
+            return wapi_send_data(self, buf, length, recv_parse_cb);
+        else
+            return wapi_send_data_without_response(self, buf, length);
+    }        
     else
         return WAPI_ERR_SEND_NOT_READY;
 }
-
-wapi_status_t m0804c_send_without_response(m0804c_handler_t *const self, uint8_t *buf, uint16_t length)
-{
-    if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
-        return WAPI_ERR_HANDLER_NOT_READY;
-
-    if(PRIV_DATA(self)->trans_send_flag)    
-        return wapi_send_data_without_response(self, buf, length);
-    else
-        return WAPI_ERR_SEND_NOT_READY;
-}
-
-
 
 wapi_status_t m0804c_cert_upload(m0804c_handler_t *const self)
 {
