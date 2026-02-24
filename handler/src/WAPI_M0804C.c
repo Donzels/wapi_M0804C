@@ -87,7 +87,8 @@ typedef struct
     pf_wapi_process_fun_t pf_wapi_process_fun; 
     pf_process_complete_t pf_process_cpl;
     uint32_t recv_timeout_tick;
-    uint32_t process_interval_tick;
+    uint32_t process_success_interval_tick;
+    uint32_t process_fail_interval_tick;
 }wapi_process_t;
 
 typedef struct
@@ -242,51 +243,51 @@ static at_cmd_set_table_t g_m0804c_at_cmd_set_table =
  * ============================================================================ */
 static wapi_process_t wapi_process_init[] = 
 {
-    {wapi_no_echo,          wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, 0},
-    // {wapi_check_cert,       wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
-    {wapi_both_2p4_5g,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
-    {wapi_set_tx_pwr,       wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
-    {wapi_disable_low_pwr,  wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
-    {wapi_disconn_transect, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
-    {wapi_set_net_config,   wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},  
+    {wapi_no_echo,          wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, 0, AT_INTERVAL_TICK},
+    // {wapi_check_cert,       wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0, AT_INTERVAL_TICK},
+    {wapi_both_2p4_5g,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0, AT_INTERVAL_TICK},
+    {wapi_set_tx_pwr,       wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0, AT_INTERVAL_TICK},
+    {wapi_disable_low_pwr,  wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0, AT_INTERVAL_TICK},
+    {wapi_disconn_transect, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0, AT_INTERVAL_TICK},
+    {wapi_set_net_config,   wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0, AT_INTERVAL_TICK},  
 };
 
 #if IS_USE_CONN_BY_CERT
 static wapi_process_t wapi_process_use_cert[] = 
 {
-    {wapi_check_cert,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0},
-    {wapi_connect_by_cert, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 5*AT_INTERVAL_TICK},    
+    {wapi_check_cert,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0, AT_INTERVAL_TICK},
+    {wapi_connect_by_cert, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 5*AT_INTERVAL_TICK, 5*AT_INTERVAL_TICK},    
 };
 #endif
 
 #if IS_USE_CONN_BY_PWD
 static wapi_process_t wapi_process_use_pwd[] = 
 {
-    {wapi_connect_by_pwd, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 5*AT_INTERVAL_TICK},    
+    {wapi_connect_by_pwd, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 5*AT_INTERVAL_TICK, 5*AT_INTERVAL_TICK},    
 };
 #endif
 
 static wapi_process_t wapi_process_conn_net[] = 
 {    
-    {wapi_check_link_layer_connect, wapi_process_complete_cb, 5*AT_TIMEOUT_TICK_STANDARD, 3*AT_INTERVAL_TICK},
-    {wapi_tcp_connect,              wapi_process_complete_cb, AT_TIMEOUT_TICK_LONG,       0},
-    {wapi_recv_data,                wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0},
+    {wapi_check_link_layer_connect, wapi_process_complete_cb, 5*AT_TIMEOUT_TICK_STANDARD, 3*AT_INTERVAL_TICK, 3*AT_INTERVAL_TICK},
+    {wapi_tcp_connect,              wapi_process_complete_cb, AT_TIMEOUT_TICK_LONG,       0, AT_INTERVAL_TICK},
+    {wapi_recv_data,                wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   0, AT_INTERVAL_TICK},
 };
 
 static wapi_process_t wapi_process_disconn[] = 
 {    
-    {wapi_tcp_disconnect, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0},
+    {wapi_tcp_disconnect, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD, 0, AT_INTERVAL_TICK},
 };
 
 static wapi_process_t wapi_process_upload_certiface[] = 
 {
-    // {wapi_test,                  wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK},
-    {wapi_no_echo,               wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK},
-    {wapi_upload_as_cert,        wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
-    {wapi_upload_as_cert_file,   wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
-    {wapi_upload_asue_cert,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
-    {wapi_upload_asue_cert_file, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK},
-    {wapi_check_cert,            wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK}
+    // {wapi_test,                  wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK, AT_INTERVAL_TICK},
+    {wapi_no_echo,               wapi_process_complete_cb, 2*AT_TIMEOUT_TICK_STANDARD, AT_INTERVAL_TICK, AT_INTERVAL_TICK},
+    {wapi_upload_as_cert,        wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK, AT_INTERVAL_TICK},
+    {wapi_upload_as_cert_file,   wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK, AT_INTERVAL_TICK},
+    {wapi_upload_asue_cert,      wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK, AT_INTERVAL_TICK},
+    {wapi_upload_asue_cert_file, wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK, AT_INTERVAL_TICK},
+    {wapi_check_cert,            wapi_process_complete_cb, AT_TIMEOUT_TICK_STANDARD,   AT_INTERVAL_TICK, AT_INTERVAL_TICK}
 };
 
 /* ============================================================================
@@ -787,50 +788,34 @@ static wapi_status_t wapi_send_data(m0804c_handler_t *self, uint8_t *buf, uint16
     PRIV_DATA(self)->wapi_send_buf[total_len - 2] = '\r';
     PRIV_DATA(self)->wapi_send_buf[total_len - 1] = '\n';
     
-    at_trans_callback_t callback = {
-        .recv_callbacks = {
-            .items = {{at_recv_parse_ok, self}, {send_recv_cb, (void *)recv_parse_cb}},
-            .count = 2
-        }
-    };
-    at_status_t status = at_trans_send(wapi_get_at_handler(self), PRIV_DATA(self)->wapi_send_buf,
-                                         total_len, &callback);
-    return (status == AT_OK) ? WAPI_OK : WAPI_ERR_OTHERS;
-}
-
-static wapi_status_t wapi_send_data_without_response(m0804c_handler_t *self, uint8_t *buf, uint16_t length)
-{
-    if (!self || !buf || 0 == length)
-        return WAPI_ERR_PARAM_INVALID;
-    
-    const char *cmd_format = "AT+NSEND,%d,1,";
-    uint16_t command_len = snprintf((char*)PRIV_DATA(self)->wapi_send_buf, SEND_BUF_SIZE, cmd_format, CUR_SOCKET);
-    
-    if (command_len >= SEND_BUF_SIZE)
+    /* Configure callback based on whether custom callback is provided */
+    at_trans_callback_t callback;
+    if (recv_parse_cb)
     {
-        WAPI_DEBUG_ERR("Send buffer overflow: command too long (len=%u, max=%u)", command_len, SEND_BUF_SIZE);
-        return WAPI_ERR_OTHERS;
+        /* With custom response callback */
+        callback = (at_trans_callback_t)
+        {
+            .recv_callbacks = {
+                .items = {
+                    {at_recv_parse_ok, self},
+                    {send_recv_cb, (void *)recv_parse_cb}
+                },
+                .count = 2
+            }
+        };
+    }
+    else
+    {
+        /* Without custom response callback */
+        callback = (at_trans_callback_t)
+        {
+            .recv_callbacks = {
+                .items = {{at_recv_parse_ok, self}},
+                .count = 1
+            }
+        };
     }
     
-    uint16_t hex_len;
-    byte_array_to_hex_string(buf, length, PRIV_DATA(self)->wapi_send_buf + command_len, &hex_len);
-    
-    uint16_t total_len = command_len + hex_len + 2; /* +2 for "\r\n" */
-    if (total_len > SEND_BUF_SIZE)
-    {
-        WAPI_DEBUG_ERR("Send buffer overflow: total length exceeds limit (len=%u, max=%u)", total_len, SEND_BUF_SIZE);
-        return WAPI_ERR_OTHERS;
-    }
-    
-    PRIV_DATA(self)->wapi_send_buf[total_len - 2] = '\r';
-    PRIV_DATA(self)->wapi_send_buf[total_len - 1] = '\n';
-    
-    at_trans_callback_t callback = {
-        .recv_callbacks = {
-            .items = {{at_recv_parse_ok, self}},
-            .count = 1
-        }
-    };
     at_status_t status = at_trans_send(wapi_get_at_handler(self), PRIV_DATA(self)->wapi_send_buf,
                                          total_len, &callback);
     return (status == AT_OK) ? WAPI_OK : WAPI_ERR_OTHERS;
@@ -936,8 +921,8 @@ static wapi_status_t table_process(m0804c_handler_t *const self, wapi_process_t 
                     is_success = true;
                     if(wapi_process[i].pf_process_cpl)
                         wapi_process[i].pf_process_cpl(self, i, PROCESS_OK); 
-                    if(wapi_process[i].process_interval_tick)
-                        self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_interval_tick);    
+                    if(wapi_process[i].process_success_interval_tick)
+                        self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_success_interval_tick);    
                     ret = AT_OS(self)->pf_sema_give(PRIV_DATA(self)->process_syn_sema_handle);
                     if(0 != ret)
                     {
@@ -946,10 +931,10 @@ static wapi_status_t table_process(m0804c_handler_t *const self, wapi_process_t 
                     }                      
                     break;
                 }  
-                else if(wapi_process[i].process_interval_tick)
+                else if(wapi_process[i].process_fail_interval_tick)
                 {
                     WAPI_DEBUG_ERR("Process failed, retrying: process_idx=%u, retry=%u", i, j);
-                    self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_interval_tick);
+                    self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_fail_interval_tick);
                 }
                                   
             }                
@@ -1420,10 +1405,7 @@ wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t l
 
     if(PRIV_DATA(self)->trans_send_flag) 
     {
-        if(recv_parse_cb)
-            return wapi_send_data(self, buf, length, recv_parse_cb);
-        else
-            return wapi_send_data_without_response(self, buf, length);
+        return wapi_send_data(self, buf, length, recv_parse_cb);
     }        
     else
         return WAPI_ERR_SEND_NOT_READY;
