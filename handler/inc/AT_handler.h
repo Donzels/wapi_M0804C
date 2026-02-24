@@ -53,6 +53,15 @@ extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
 #define MAX_RECV_CNT_OF_CMD_SEND    1
 
 /**
+ * @def AT_MAX_HOLDERS
+ * @brief Maximum number of holder instances supported by one AT handler
+ *
+ * Defines the maximum number of concurrent holder instances that can share a single AT handler.
+ * Currently limited to 1 because one AT handler is bound to one UART interface.
+ */
+#define AT_MAX_HOLDERS              1
+
+/**
  * @enum at_status_t
  * @brief Standardized AT command operation status codes
  * 
@@ -71,7 +80,7 @@ typedef enum
     AT_ERR_OTHERS             /* Unspecified error (e.g., UART transmission failure) */
 } at_status_t;
 
-typedef void (*pf_at_recv_parse_t)(uint8_t *buf, uint16_t len, void *arg, void *holder);
+typedef void (*pf_at_recv_parse_t)(uint8_t *buf, uint16_t len, void *arg);
 
 /**
  * @struct at_recv_callback_item_t
@@ -126,7 +135,6 @@ AT_DEFINE_RECV_CALLBACK_SET(at_trans_recv_callback_set_t, MAX_RECV_CNT_OF_TRANS_
 typedef struct
 {
     at_trans_recv_callback_set_t  recv_callbacks; /* Receive callback set for transparent transmission */
-    void                          *holder;        /* Holder context for callback */
 } at_trans_callback_t;
 
 /* ---------------- OSAL interface for AT handler (semaphore + timer) ---------------- */
@@ -177,8 +185,7 @@ typedef struct
 {
     const at_cmd_set_t  *table;     /* Pointer to the AT command table array (each element is an at_cmd_set_t entry 
                                      defining a unique AT command function, template, and expected response) */
-    uint8_t             table_len; 
-    void                *holder;                                
+    uint8_t             table_len;                                
 } at_cmd_set_table_t;
 
 /**
@@ -194,6 +201,7 @@ typedef struct
     uart_proto_input_arg_t  *uart_proto_input_arg; /* UART protocol layer input arguments */
     at_cmd_set_table_t      *at_cmd_set_table;   /* Pointer to AT command table container */    
     at_os_interface_t       *at_os_interface;    /* OSAL for semaphore/timer */
+    void                    *holder;             /* Context holder (e.g., the module instance that owns this AT handler) */
 } at_input_arg_t;
 
 /**
@@ -262,7 +270,6 @@ at_status_t at_trans_send(at_handler_t *const self, uint8_t *const data, uint16_
  * @param hook Callback function pointer (NULL is invalid)
  * @param arg  User argument passed to the hook
  * @return at_status_t Operation status
- * @note The holder parameter passed to the hook will be the AT handler instance itself
  */
 at_status_t at_recv_hook_register(at_handler_t *const self, pf_at_recv_parse_t hook, void *arg);
 

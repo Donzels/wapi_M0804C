@@ -107,12 +107,11 @@ static wapi_m0804c_input_arg_t wapi_input_arg =
     .callbacks = &wapi_callbacks     
 };
 
-static at_status_t wapi_at_recv_parse(uint8_t *buf, uint16_t len, void *arg, void *holder)
+static void wapi_at_recv_parse(uint8_t *buf, uint16_t len, void *arg)
 {
     /* It's meaningless, as M0804C will response debug info after send */
     WAPI_COMMU_DEBUG_OUT("WAPI AT RECV PARSE CALLBACK\r\n");
-    WAPI_COMMU_DEBUG_STRING(buf, len);      
-    return AT_OK;
+    WAPI_COMMU_DEBUG_STRING(buf, len);
 }
 
 static void wapi_commu_task(void *argument)

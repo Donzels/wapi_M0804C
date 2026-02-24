@@ -326,7 +326,7 @@ static void at_parse_algo(uint8_t *const p_data, uint16_t data_len, void *arg)
 
     if (PRIV_DATA(self)->recv_hook)
     {
-        PRIV_DATA(self)->recv_hook(p_data, data_len, PRIV_DATA(self)->recv_hook_arg, self);
+        PRIV_DATA(self)->recv_hook(p_data, data_len, PRIV_DATA(self)->recv_hook_arg);
     }
     else if (0 != UP_OS_IF(self)->pf_os_queue_get(PRIV_DATA(self)->send_queue_handle, &send_info, 0))
     {
@@ -346,7 +346,7 @@ static void at_parse_algo(uint8_t *const p_data, uint16_t data_len, void *arg)
         }            
         if(cmd_entry->recv_callbacks.items[parse_algo_index].pf_recv_parse)
             cmd_entry->recv_callbacks.items[parse_algo_index].pf_recv_parse(p_data, data_len,\
-                                 cmd_entry->recv_callbacks.items[parse_algo_index].arg, self->at_input_arg->at_cmd_set_table->holder);
+                                 cmd_entry->recv_callbacks.items[parse_algo_index].arg);
         else
             AT_DEBUG_ERR("AT command parse callback is NULL at index %u", parse_algo_index);                
     }
@@ -361,8 +361,7 @@ static void at_parse_algo(uint8_t *const p_data, uint16_t data_len, void *arg)
         }
         if(send_info.u.transparent_event.callback.recv_callbacks.items[parse_algo_index].pf_recv_parse)
             send_info.u.transparent_event.callback.recv_callbacks.items[parse_algo_index].pf_recv_parse(p_data, data_len,\
-                             send_info.u.transparent_event.callback.recv_callbacks.items[parse_algo_index].arg,
-                             send_info.u.transparent_event.callback.holder);
+                             send_info.u.transparent_event.callback.recv_callbacks.items[parse_algo_index].arg);
         else
             AT_DEBUG_ERR("Transparent parse callback is NULL at index %u", parse_algo_index);
     }
@@ -513,7 +512,7 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
     }
 
     OS_IF(self)->pf_sema_binary_create(&PRIV_DATA(self)->send_feedback_sema_handle);
-    UP_OS_IF(self)->pf_os_queue_create(1, sizeof(send_info_t), &PRIV_DATA(self)->send_queue_handle);
+    UP_OS_IF(self)->pf_os_queue_create(AT_MAX_HOLDERS, sizeof(send_info_t), &PRIV_DATA(self)->send_queue_handle);
     OS_IF(self)->pf_timer_create(&PRIV_DATA(self)->timeout_timer, "at_timeout", AT_TIMEOUT_TICK,\
                                  0, timeout_callback, self);
     RELEASE_SEND_FEEDBACK_SEMA(self);
