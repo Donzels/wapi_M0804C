@@ -124,35 +124,22 @@ static at_status_t at_state_transition(at_handler_t *const self, at_handler_stat
         return AT_ERR_PARAM_INVALID;
 
     at_handler_state_t old_state = PRIV_DATA(self)->current_state;
-    
-    /* Define valid state transitions */
-    bool is_valid = false;
-    switch (old_state)
+
+    static const bool transition_table[AT_STATE_COUNT][AT_STATE_COUNT] =
     {
-        case AT_STATE_UNINIT:
-            is_valid = (new_state == AT_STATE_IDLE || new_state == AT_STATE_ERROR);
-            break;
-        
-        case AT_STATE_IDLE:
-            is_valid = (new_state == AT_STATE_SENDING || new_state == AT_STATE_ERROR);
-            break;
-        
-        case AT_STATE_SENDING:
-            is_valid = (new_state == AT_STATE_WAITING_RESPONSE || new_state == AT_STATE_IDLE ||
-                       new_state == AT_STATE_ERROR);
-            break;
-        
-        case AT_STATE_WAITING_RESPONSE:
-            is_valid = (new_state == AT_STATE_IDLE || new_state == AT_STATE_ERROR);
-            break;
-        
-        case AT_STATE_ERROR:
-            is_valid = (new_state == AT_STATE_IDLE || new_state == AT_STATE_UNINIT);
-            break;
-        
-        default:
-            is_valid = false;
-            break;
+        /*                            to  
+                                      UNINIT  IDLE   SENDING  WAITING_RESPONSE  ERROR */
+        /* from UNINIT */           { false,  true,  false,   false,            true  },
+        /* from IDLE */             { false,  false, true,    false,            true  },
+        /* from SENDING */          { false,  true,  false,   true,             true  },
+        /* from WAITING_RESPONSE */ { false,  true,  false,   false,            true  },
+        /* from ERROR */            { true,   true,  false,   false,            false }
+    };
+
+    bool is_valid = false;
+    if ((old_state < AT_STATE_COUNT) && (new_state < AT_STATE_COUNT))
+    {
+        is_valid = transition_table[old_state][new_state];
     }
     
     if (!is_valid)

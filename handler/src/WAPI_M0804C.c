@@ -506,51 +506,26 @@ static wapi_status_t wapi_state_transition(m0804c_handler_t *const self, wapi_ha
         return WAPI_ERR_PARAM_INVALID;
 
     wapi_handler_state_t old_state = PRIV_DATA(self)->current_state;
-    
-    /* Define valid state transitions */
-    bool is_valid = false;
-    switch (old_state)
+
+    static const bool transition_table[WAPI_STATE_COUNT][WAPI_STATE_COUNT] =
     {
-        case WAPI_STATE_UNINIT:
-            is_valid = (new_state == WAPI_STATE_INITING || new_state == WAPI_STATE_ERROR);
-            break;
-        
-        case WAPI_STATE_INITING:
-            is_valid = (new_state == WAPI_STATE_INITED || new_state == WAPI_STATE_ERROR);
-            break;
-        
-        case WAPI_STATE_INITED:
-            is_valid = (new_state == WAPI_STATE_CONFIGURING_CONN || new_state == WAPI_STATE_ERROR);
-            break;
-        
-        case WAPI_STATE_CONFIGURING_CONN:
-            is_valid = (new_state == WAPI_STATE_CONFIGURED || new_state == WAPI_STATE_ERROR);
-            break;
-        
-        case WAPI_STATE_CONFIGURED:
-            is_valid = (new_state == WAPI_STATE_CONNECTING || new_state == WAPI_STATE_ERROR);
-            break;
-        
-        case WAPI_STATE_CONNECTING:
-            is_valid = (new_state == WAPI_STATE_CONNECTED || new_state == WAPI_STATE_ERROR);
-            break;
-        
-        case WAPI_STATE_CONNECTED:
-            is_valid = (new_state == WAPI_STATE_DISCONNECTING || new_state == WAPI_STATE_ERROR ||
-                       new_state == WAPI_STATE_CONFIGURING_CONN);  /* Reconnect with different config */
-            break;
-        
-        case WAPI_STATE_DISCONNECTING:
-            is_valid = (new_state == WAPI_STATE_INITED || new_state == WAPI_STATE_ERROR);
-            break;
-        
-        case WAPI_STATE_ERROR:
-            is_valid = (new_state == WAPI_STATE_INITING || new_state == WAPI_STATE_UNINIT);
-            break;
-        
-        default:
-            is_valid = false;
-            break;
+        /*                            to 
+                                      UNINIT INITING INITED  CFG_CONN CONFIGURED CONNECTING CONNECTED DISCONN  ERROR */
+        /* from UNINIT */           { false, true,   false,  false,   false,     false,     false,    false,   true  },
+        /* from INITING */          { false, false,  true,   false,   false,     false,     false,    false,   true  },
+        /* from INITED */           { false, false,  false,  true,    false,     false,     false,    false,   true  },
+        /* from CONFIGURING_CONN */ { false, false,  false,  false,   true,      false,     false,    false,   true  },
+        /* from CONFIGURED */       { false, false,  false,  false,   false,     true,      false,    false,   true  },
+        /* from CONNECTING */       { false, false,  false,  false,   false,     false,     true,     false,   true  },
+        /* from CONNECTED */        { false, false,  false,  true,    false,     false,     false,    true,    true  },
+        /* from DISCONNECTING */    { false, false,  true,   false,   false,     false,     false,    false,   true  },
+        /* from ERROR */            { true,  true,   false,  false,   false,     false,     false,    false,   false }
+    };
+
+    bool is_valid = false;
+    if ((old_state < WAPI_STATE_COUNT) && (new_state < WAPI_STATE_COUNT))
+    {
+        is_valid = transition_table[old_state][new_state];
     }
     
     if (!is_valid)
