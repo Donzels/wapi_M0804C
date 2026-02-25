@@ -18,8 +18,52 @@
 #define AT_TIMEOUT_TICK_STANDARD            500
 #define AT_TIMEOUT_TICK_LONG                30000
 #define AT_INTERVAL_TICK                    1000
+
+/**
+ * @brief Single AT command retry count within a process step
+ * 
+ * When a single AT command fails or times out (within table_process), the command
+ * will be retried up to AT_ERR_REPEAT_CNT times before considering that step failed
+ * and moving to the next level of retry (table_process exit ? generic_process retry).
+ * 
+ * This is the innermost retry level, handling transient communication issues at the
+ * AT command level (e.g., UART receive buffer full, temporary device unresponsiveness).
+ * 
+ * Used in: table_process() - inner retry loop for individual AT commands
+ * Value 4 means: Execute once, if fails retry 3 more times = 4 total attempts per step
+ * 
+ * Retry hierarchy (from innermost to outermost):
+ * 1. AT_ERR_REPEAT_CNT (4) - Single AT command level
+ * 2. WAPI_PROCESS_RETRY_MAX (2) - Process table level
+ * 3. WAPI_PROCESS_FAIL_MAX (3) - Thread level
+ */
 #define AT_ERR_REPEAT_CNT                   4
+
+/**
+ * @brief Table-level retry count for WAPI process sequences
+ * 
+ * When a complete process table fails (e.g., wapi_process_init), the entire table
+ * will be re-executed up to WAPI_PROCESS_RETRY_MAX times before reporting failure
+ * to the thread handler. This handles systematic failures that might recover with
+ * fresh attempt (e.g., device temporarily unresponsive).
+ * 
+ * Used in: generic_process()
+ * Value 2 means: Execute once, if fails retry once more = 2 total attempts
+ */
 #define WAPI_PROCESS_RETRY_MAX              2
+
+/**
+ * @brief Maximum consecutive process failures before entering permanent error state
+ * 
+ * After a complete process table fails (exhausted WAPI_PROCESS_RETRY_MAX attempts),
+ * the thread increments fail_cnt. When fail_cnt reaches WAPI_PROCESS_FAIL_MAX,
+ * the thread stops retrying and invokes pf_process_err_cb() callback to signal
+ * permanent failure. This prevents infinite retry loops on systemic failures.
+ * 
+ * Used in: generic_wapi_thread()
+ * Value 3 means: Allow 3 consecutive table-level failures before declaring error
+ * Flow: success?fail?fail?fail?error_callback
+ */
 #define WAPI_PROCESS_FAIL_MAX               3
 
 #define SEND_BUF_SIZE                       128       
@@ -99,7 +143,7 @@ typedef struct
 typedef struct m0804c_priv_data
 {
     bool is_inited;
-    bool trans_send_flag;
+    wapi_handler_state_t current_state;  /* Current state machine state */
     wapi_conn_mode_t wapi_conn_mode;
     void *process_syn_sema_handle;
     void *multi_send_syn_sema_handle;
@@ -116,11 +160,25 @@ typedef struct m0804c_priv_data
     at_handler_t *at_handler;
     at_cmd_set_t *at_cmd_table_copy; /* Mutable copy of AT command table with arg set to self */
     uint8_t wapi_send_buf[SEND_BUF_SIZE];
+    wapi_subject_t *observer_subject;   /* Observer pattern subject for event notification */
 }m0804c_priv_data_t;
 
 /* ============================================================================
  * Forward Declarations
  * ============================================================================ */
+
+/**
+ * @brief State transition validation and execution for WAPI handler
+ *
+ * Validates if the state transition is allowed and updates the state.
+ * Logs transitions for debugging purposes.
+ *
+ * @param self Pointer to WAPI handler instance
+ * @param new_state Target state to transition to
+ * @return wapi_status_t WAPI_OK if transition is valid, error code otherwise
+ */
+static wapi_status_t wapi_state_transition(m0804c_handler_t *const self, wapi_handler_state_t new_state);
+
 /* AT parsing functions */
 static void at_recv_parse_ok(uint8_t *buf, uint16_t len, void *arg);
 static void at_recv_parse_tcp_connect(uint8_t *buf, uint16_t len, void *arg);
@@ -184,6 +242,8 @@ static void reset_wapi_state(m0804c_handler_t *self);
 static wapi_status_t wapi_send_data(m0804c_handler_t *self, uint8_t *buf, uint16_t length,
                                     pf_at_recv_parse_t recv_parse_cb);
 static wapi_status_t m0804c_start_recv(m0804c_handler_t *const self);
+
+static wapi_status_t wapi_subject_init(m0804c_handler_t *const self);
 /* ============================================================================
  * Global Data
  * ============================================================================ */
@@ -349,6 +409,8 @@ static void init_process_start(m0804c_handler_t *self)
     self->input_arg->pwr_ops->pf_m0804c_open(self);
     PRIV_DATA(self)->wapi_conn_mode = CONN_BY_NOTHING;
     reset_wapi_state(self);
+    /* Transition to INITING state */
+    wapi_state_transition(self, WAPI_STATE_INITING);
 }
 
 static void init_process_retry(m0804c_handler_t *self)
@@ -360,6 +422,8 @@ static void init_process_retry(m0804c_handler_t *self)
 static void init_process_success(m0804c_handler_t *self)
 {
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->init_success_sema_handle);
+    /* Transition to INITED state after successful initialization */
+    wapi_state_transition(self, WAPI_STATE_INITED);
 }
 
 #if IS_USE_CONN_BY_CERT
@@ -368,6 +432,8 @@ static void conn_cfg_by_cert_process_start(m0804c_handler_t *self)
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->use_cert_sema_handle, OS_DELAY_MAX);
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->connect_cfg_success_sema_handle, 0);
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->init_success_sema_handle, OS_DELAY_MAX);
+    /* Transition to CONFIGURING_CONN state */
+    wapi_state_transition(self, WAPI_STATE_CONFIGURING_CONN);
 }
 
 static void conn_cfg_by_cert_process_retry(m0804c_handler_t *self)
@@ -380,6 +446,8 @@ static void conn_cfg_by_cert_process_success(m0804c_handler_t *self)
 {
     PRIV_DATA(self)->wapi_conn_mode = CONN_BY_CERT;
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->connect_cfg_success_sema_handle);
+    /* Transition to CONFIGURED state */
+    wapi_state_transition(self, WAPI_STATE_CONFIGURED);
 }
 #endif
 
@@ -389,6 +457,8 @@ static void conn_cfg_by_pwd_process_start(m0804c_handler_t *self)
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->use_pwd_sema_handle, OS_DELAY_MAX);
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->connect_cfg_success_sema_handle, 0);
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->init_success_sema_handle, OS_DELAY_MAX);
+    /* Transition to CONFIGURING_CONN state */
+    wapi_state_transition(self, WAPI_STATE_CONFIGURING_CONN);
 }
 
 static void conn_cfg_by_pwd_process_retry(m0804c_handler_t *self)
@@ -401,12 +471,16 @@ static void conn_cfg_by_pwd_process_success(m0804c_handler_t *self)
 {
     PRIV_DATA(self)->wapi_conn_mode = CONN_BY_PWD;
     AT_OS(self)->pf_sema_give(PRIV_DATA(self)->connect_cfg_success_sema_handle);
+    /* Transition to CONFIGURED state */
+    wapi_state_transition(self, WAPI_STATE_CONFIGURED);
 }
 #endif
 /* Conn process success callback */
 static void conn_process_start(m0804c_handler_t *self)
 {
     AT_OS(self)->pf_sema_take(PRIV_DATA(self)->connect_cfg_success_sema_handle, OS_DELAY_MAX);
+    /* Transition to CONNECTING state */
+    wapi_state_transition(self, WAPI_STATE_CONNECTING);
 }
 
 static void conn_process_retry(m0804c_handler_t *self)
@@ -416,9 +490,79 @@ static void conn_process_retry(m0804c_handler_t *self)
 
 static void conn_process_success(m0804c_handler_t *self)
 {
-    PRIV_DATA(self)->trans_send_flag = true;
+    /* No need for trans_send_flag - the CONNECTED state itself indicates readiness for transmission */
     at_recv_hook_register(PRIV_DATA(self)->at_handler, check_connect, self);
+    /* Transition to CONNECTED state */
+    wapi_state_transition(self, WAPI_STATE_CONNECTED);
     // m0804c_start_recv(self);
+}
+
+/* ============================================================================
+ * State Machine Implementation
+ * ============================================================================ */
+static wapi_status_t wapi_state_transition(m0804c_handler_t *const self, wapi_handler_state_t new_state)
+{
+    if (!self || !PRIV_DATA(self))
+        return WAPI_ERR_PARAM_INVALID;
+
+    wapi_handler_state_t old_state = PRIV_DATA(self)->current_state;
+    
+    /* Define valid state transitions */
+    bool is_valid = false;
+    switch (old_state)
+    {
+        case WAPI_STATE_UNINIT:
+            is_valid = (new_state == WAPI_STATE_INITING || new_state == WAPI_STATE_ERROR);
+            break;
+        
+        case WAPI_STATE_INITING:
+            is_valid = (new_state == WAPI_STATE_INITED || new_state == WAPI_STATE_ERROR);
+            break;
+        
+        case WAPI_STATE_INITED:
+            is_valid = (new_state == WAPI_STATE_CONFIGURING_CONN || new_state == WAPI_STATE_ERROR);
+            break;
+        
+        case WAPI_STATE_CONFIGURING_CONN:
+            is_valid = (new_state == WAPI_STATE_CONFIGURED || new_state == WAPI_STATE_ERROR);
+            break;
+        
+        case WAPI_STATE_CONFIGURED:
+            is_valid = (new_state == WAPI_STATE_CONNECTING || new_state == WAPI_STATE_ERROR);
+            break;
+        
+        case WAPI_STATE_CONNECTING:
+            is_valid = (new_state == WAPI_STATE_CONNECTED || new_state == WAPI_STATE_ERROR);
+            break;
+        
+        case WAPI_STATE_CONNECTED:
+            is_valid = (new_state == WAPI_STATE_DISCONNECTING || new_state == WAPI_STATE_ERROR ||
+                       new_state == WAPI_STATE_CONFIGURING_CONN);  /* Reconnect with different config */
+            break;
+        
+        case WAPI_STATE_DISCONNECTING:
+            is_valid = (new_state == WAPI_STATE_INITED || new_state == WAPI_STATE_ERROR);
+            break;
+        
+        case WAPI_STATE_ERROR:
+            is_valid = (new_state == WAPI_STATE_INITING || new_state == WAPI_STATE_UNINIT);
+            break;
+        
+        default:
+            is_valid = false;
+            break;
+    }
+    
+    if (!is_valid)
+    {
+        WAPI_DEBUG_ERR("WAPI Invalid state transition: %s -> %s",
+                       wapi_get_state_name(old_state), wapi_get_state_name(new_state));
+        return WAPI_ERR_OTHERS;
+    }
+    
+    PRIV_DATA(self)->current_state = new_state;
+    WAPI_DEBUG_OUT("WAPI State transition: %s -> %s", wapi_get_state_name(old_state), wapi_get_state_name(new_state));
+    return WAPI_OK;
 }
 
 /* ============================================================================
@@ -736,10 +880,11 @@ static void check_connect(uint8_t *buf, uint16_t len, void *arg)
         return;
     }
 
-    if (true == PRIV_DATA(self)->trans_send_flag && find_substring_in_buffer(buf, len, string) >= 0)
+    if (wapi_get_state(self) == WAPI_STATE_CONNECTED && find_substring_in_buffer(buf, len, string) >= 0)
     {
-        WAPI_DEBUG_ERR("Socket error detected, reconnecting...");
-        PRIV_DATA(self)->trans_send_flag = false;         
+        WAPI_DEBUG_ERR("Socket error detected in CONNECTED state, reconnecting...");
+        /* Transition to error state first, then restart */
+        wapi_state_transition(self, WAPI_STATE_ERROR);         
         m0804c_init(self);/* restart init and connect process */  
 #if IS_USE_CONN_BY_CERT
         if(CONN_BY_CERT == PRIV_DATA(self)->wapi_conn_mode)
@@ -931,16 +1076,21 @@ static wapi_status_t table_process(m0804c_handler_t *const self, wapi_process_t 
                     }                      
                     break;
                 }  
-                else if(wapi_process[i].process_fail_interval_tick)
+                else
                 {
-                    WAPI_DEBUG_ERR("Process failed, retrying: process_idx=%u, retry=%u", i, j);
-                    self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_fail_interval_tick);
+                    /* Queue returned error response - treat as command failure, will retry */
+                    WAPI_DEBUG_ERR("AT command failed at step %u, retrying: attempt %u/%u", i, j + 1, AT_ERR_REPEAT_CNT);
+                    if(wapi_process[i].process_fail_interval_tick)
+                        self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_fail_interval_tick);
                 }
-                                  
             }                
             else
             {
-                WAPI_DEBUG_ERR("Queue get failed: process_idx=%u, status=%d, retry=%u", i, ret, j);
+                /* Queue get timeout - AT command timeout or no response received */
+                WAPI_DEBUG_ERR("AT command timeout at step %u, retrying: attempt %u/%u", i, j + 1, AT_ERR_REPEAT_CNT);
+                /* Treat timeout as command failure and retry with delay */
+                if(wapi_process[i].process_fail_interval_tick)
+                    self->input_arg->os_interface->pf_os_delay_ms((int32_t)wapi_process[i].process_fail_interval_tick);
             }
         }   
         if(!is_success)
@@ -1041,8 +1191,28 @@ static void generic_wapi_thread(m0804c_handler_t *self,
         if(WAPI_OK == ret)
         {
             fail_cnt = 0;
-            if(self->input_arg->callbacks && self->input_arg->callbacks->pf_process_success_cb)
-                self->input_arg->callbacks->pf_process_success_cb(self, cbs->process_type);
+            
+            /* Notify observers of successful process completion */
+            wapi_event_t event = WAPI_EVENT_ERROR; /* Default to error */
+            switch(cbs->process_type)
+            {
+                case PROCESS_INIT:
+                    event = WAPI_EVENT_INIT_SUCCESS;
+                    break;
+                case PROCESS_CERT_AUTH:
+                    event = WAPI_EVENT_CERT_AUTH_SUCCESS;
+                    break;
+                case PROCESS_PWD_AUTH:
+                    event = WAPI_EVENT_PWD_AUTH_SUCCESS;
+                    break;
+                case PROCESS_CONNECT:
+                    event = WAPI_EVENT_CONNECTED;
+                    break;
+                default:
+                    break;
+            }
+            wapi_subject_notify(self, event);
+            
             if(cbs && cbs->pf_process_success)
                 cbs->pf_process_success(self);
         } 
@@ -1058,8 +1228,27 @@ static void generic_wapi_thread(m0804c_handler_t *self,
         else
         {
             WAPI_DEBUG_ERR("%s failed permanently after %u attempts", cbs->process_name, WAPI_PROCESS_FAIL_MAX);
-            if(self->input_arg->callbacks && self->input_arg->callbacks->pf_process_err_cb)
-                self->input_arg->callbacks->pf_process_err_cb(self, cbs->process_type);
+            
+            /* Notify observers of failed process */
+            wapi_event_t event = WAPI_EVENT_ERROR; /* Default to error */
+            switch(cbs->process_type)
+            {
+                case PROCESS_INIT:
+                    event = WAPI_EVENT_INIT_FAILED;
+                    break;
+                case PROCESS_CERT_AUTH:
+                    event = WAPI_EVENT_CERT_AUTH_FAILED;
+                    break;
+                case PROCESS_PWD_AUTH:
+                    event = WAPI_EVENT_PWD_AUTH_FAILED;
+                    break;
+                case PROCESS_CONNECT:
+                    event = WAPI_EVENT_CONNECT_FAILED;
+                    break;
+                default:
+                    break;
+            }
+            wapi_subject_notify(self, event);
         }
     }
 }
@@ -1133,6 +1322,8 @@ static wapi_status_t m0804c_start_recv(m0804c_handler_t *const self)
     return (status == AT_OK) ? WAPI_OK : WAPI_ERR_OTHERS;
 }
 
+/* Forward declaration for wapi_subject_init (called from m0804c_inst) */
+static wapi_status_t wapi_subject_init(m0804c_handler_t *const self);
 
 wapi_status_t m0804c_inst(m0804c_handler_t *const self, wapi_m0804c_input_arg_t *const p_input_args)
 {
@@ -1146,8 +1337,7 @@ wapi_status_t m0804c_inst(m0804c_handler_t *const self, wapi_m0804c_input_arg_t 
        !p_input_args->pwr_ops->pf_m0804c_close ||
        !p_input_args->data_provider ||
        !p_input_args->data_provider->pf_get_wapi_info ||
-       !p_input_args->data_provider->pf_get_cert_file ||
-       !p_input_args->callbacks)
+       !p_input_args->data_provider->pf_get_cert_file)
     {
         return WAPI_ERR_PARAM_INVALID;
     }
@@ -1158,6 +1348,9 @@ wapi_status_t m0804c_inst(m0804c_handler_t *const self, wapi_m0804c_input_arg_t 
         return WAPI_ERR_OTHERS;
 
     memset(PRIV_DATA(self), 0, sizeof(m0804c_priv_data_t));
+    
+    /* Initialize state machine to UNINIT */
+    PRIV_DATA(self)->current_state = WAPI_STATE_UNINIT;
 
     /* Allocate at_handler */
     PRIV_DATA(self)->at_handler = (at_handler_t *)MALLOC(sizeof(at_handler_t));
@@ -1345,6 +1538,18 @@ wapi_status_t m0804c_inst(m0804c_handler_t *const self, wapi_m0804c_input_arg_t 
         return WAPI_ERR_OTHERS;
     }
 
+    /* Initialize observer subject for event notification system */
+    if (WAPI_OK != wapi_subject_init(self))
+    {
+        WAPI_DEBUG_ERR("Observer subject initialization failed");
+        FREE(PRIV_DATA(self)->at_cmd_table_copy);
+        FREE(PRIV_DATA(self)->at_handler);
+        if (PRIV_DATA(self)->observer_subject)
+            FREE(PRIV_DATA(self)->observer_subject);
+        FREE(PRIV_DATA(self));
+        return WAPI_ERR_OTHERS;
+    }
+
     PRIV_DATA(self)->is_inited = true;
     return WAPI_OK;
 }
@@ -1403,12 +1608,17 @@ wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t l
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
         return WAPI_ERR_HANDLER_NOT_READY;
 
-    if(PRIV_DATA(self)->trans_send_flag) 
+    /* Only allow data transmission when in CONNECTED state (replaces trans_send_flag) */
+    if(wapi_get_state(self) == WAPI_STATE_CONNECTED) 
     {
         return wapi_send_data(self, buf, length, recv_parse_cb);
     }        
     else
+    {
+        WAPI_DEBUG_ERR("Cannot send data: device not in CONNECTED state (current: %s)", 
+                       wapi_get_state_name(wapi_get_state(self)));
         return WAPI_ERR_SEND_NOT_READY;
+    }
 }
 
 wapi_status_t m0804c_cert_upload(m0804c_handler_t *const self)
@@ -1427,6 +1637,34 @@ wapi_status_t m0804c_disconn(m0804c_handler_t *const self)
     if(!self || !PRIV_DATA(self) || !PRIV_DATA(self)->is_inited)
         return WAPI_ERR_HANDLER_NOT_READY;
     return disconn_process(self);
+}
+
+/* Public State Query Functions --------------------------------------------- */
+wapi_handler_state_t wapi_get_state(m0804c_handler_t *const self)
+{
+    if (!self || !PRIV_DATA(self))
+        return WAPI_STATE_UNINIT;
+    return PRIV_DATA(self)->current_state;
+}
+
+const char* wapi_get_state_name(wapi_handler_state_t state)
+{
+    static const char* state_names[] = 
+    {
+        [WAPI_STATE_UNINIT]          = "UNINIT",
+        [WAPI_STATE_INITING]         = "INITING",
+        [WAPI_STATE_INITED]          = "INITED",
+        [WAPI_STATE_CONFIGURING_CONN] = "CONFIGURING_CONN",
+        [WAPI_STATE_CONFIGURED]      = "CONFIGURED",
+        [WAPI_STATE_CONNECTING]      = "CONNECTING",
+        [WAPI_STATE_CONNECTED]       = "CONNECTED",
+        [WAPI_STATE_DISCONNECTING]   = "DISCONNECTING",
+        [WAPI_STATE_ERROR]           = "ERROR"
+    };
+    
+    if (state < (sizeof(state_names) / sizeof(state_names[0])))
+        return state_names[state];
+    return "UNKNOWN";
 }
 
 /* return true when valid, others invalid */
@@ -1450,6 +1688,209 @@ void validate_wapi_info(wapi_info_t *const wapi_info)
 {
     uint16_t digest = M0804C_DATA_INTEGRITY_ALGO((uint8_t *)wapi_info, sizeof(wapi_info_t) - sizeof(uint16_t));
     wapi_info->digest = digest;
+}
+
+/* ============================================================================
+ * Observer Pattern Implementation
+ * ============================================================================
+ * Implements the Observer design pattern for flexible event notification.
+ * Multiple observers can register and receive notifications of WAPI events.
+ */
+
+/**
+ * @brief Initialize the observer subject (event dispatcher)
+ *
+ * Allocates and initializes the observer subject structure inside m0804c_priv_data.
+ * This should be called after m0804c_inst() to enable observer functionality.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @return WAPI_OK on success, WAPI_ERR_PARAM_INVALID if self is NULL
+ */
+static wapi_status_t wapi_subject_init(m0804c_handler_t *const self)
+{
+    if (!self || !PRIV_DATA(self))
+        return WAPI_ERR_PARAM_INVALID;
+    
+    /* Allocate the subject structure */
+    PRIV_DATA(self)->observer_subject = (wapi_subject_t *)MALLOC(sizeof(wapi_subject_t));
+    if (!PRIV_DATA(self)->observer_subject)
+        return WAPI_ERR_OTHERS;
+    
+    /* Initialize linked list sentinel */
+    t_list_init(&PRIV_DATA(self)->observer_subject->observers_sentinel);
+    
+    WAPI_DEBUG_OUT("Observer subject initialized");
+    
+    return WAPI_OK;
+}
+
+/**
+ * @brief Attach an observer to receive WAPI events
+ *
+ * Registers an observer to receive notifications. The observer must have a valid
+ * on_notify callback function.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @param observer Pointer to the observer structure
+ * @return WAPI_OK on success
+ * @return WAPI_ERR_PARAM_INVALID if parameters invalid
+ * @return WAPI_ERR_OTHERS if memory allocation fails
+ */
+wapi_status_t wapi_subject_attach(m0804c_handler_t *const self, wapi_observer_t *observer)
+{
+    if (!self || !PRIV_DATA(self) || !observer || !observer->on_notify)
+        return WAPI_ERR_PARAM_INVALID;
+    
+    wapi_subject_t *subject = PRIV_DATA(self)->observer_subject;
+    if (!subject)
+        return WAPI_ERR_PARAM_INVALID;
+    
+    /* Allocate observer node */
+    wapi_observer_node_t *node = (wapi_observer_node_t *)MALLOC(sizeof(wapi_observer_node_t));
+    if (!node)
+        return WAPI_ERR_OTHERS;
+    
+    /* Initialize node and attach observer */
+    t_list_init(&node->list);
+    node->observer = observer;
+    
+    /* Insert at end of list */
+    UP_OS(self)->pf_os_enter_critical();
+    t_list_insert_before(&subject->observers_sentinel, &node->list);
+    UP_OS(self)->pf_os_exit_critical(0);
+    
+    WAPI_DEBUG_OUT("Observer attached successfully");
+    
+    return WAPI_OK;
+}
+
+/**
+ * @brief Detach an observer from event notifications
+ *
+ * Unregisters an observer so it no longer receives notifications.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @param observer Pointer to the observer to remove
+ * @return WAPI_OK on success
+ * @return WAPI_ERR_PARAM_INVALID if observer not found or invalid parameters
+ */
+wapi_status_t wapi_subject_detach(m0804c_handler_t *const self, wapi_observer_t *observer)
+{
+    if (!self || !PRIV_DATA(self) || !observer)
+        return WAPI_ERR_PARAM_INVALID;
+    
+    wapi_subject_t *subject = PRIV_DATA(self)->observer_subject;
+    if (!subject)
+        return WAPI_ERR_PARAM_INVALID;
+    
+    /* Find and remove the matching observer node */
+    UP_OS(self)->pf_os_enter_critical();
+    
+    t_list_t *head = &subject->observers_sentinel;
+    for (t_list_t *current = head->next; current != head; current = current->next)
+    {
+        wapi_observer_node_t *node = T_LIST_ENTRY(current, wapi_observer_node_t, list);
+        
+        if (node->observer == observer)
+        {
+            t_list_remove(&node->list);
+            UP_OS(self)->pf_os_exit_critical(0);
+            
+            FREE(node);
+            WAPI_DEBUG_OUT("Observer detached successfully");
+            return WAPI_OK;
+        }
+    }
+    
+    UP_OS(self)->pf_os_exit_critical(0);
+    WAPI_DEBUG_ERR("Observer not found");
+    return WAPI_ERR_PARAM_INVALID;
+}
+
+/**
+ * @brief Notify all attached observers of a WAPI event
+ *
+ * Dispatches an event to all registered observers. Each observer's on_notify
+ * callback is invoked synchronously in order.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @param event The WAPI event to notify observers about
+ */
+void wapi_subject_notify(m0804c_handler_t *const self, wapi_event_t event)
+{
+    if (!self || !PRIV_DATA(self))
+        return;
+    
+    wapi_subject_t *subject = PRIV_DATA(self)->observer_subject;
+    if (!subject)
+        return;
+    
+    WAPI_DEBUG_OUT("Notifying observers of event: %s", wapi_get_event_name(event));
+    
+    /* Notify all observers in the linked list */
+    t_list_t *head = &subject->observers_sentinel;
+    for (t_list_t *current = head->next; current != head; current = current->next)
+    {
+        wapi_observer_node_t *node = T_LIST_ENTRY(current, wapi_observer_node_t, list);
+        
+        if (node && node->observer && node->observer->on_notify)
+        {
+            node->observer->on_notify(node->observer, self, event);
+        }
+    }
+}
+
+/**
+ * @brief Get human-readable name for a WAPI event
+ *
+ * @param event The event enumeration value
+ * @return const char* Event name string
+ */
+const char* wapi_get_event_name(wapi_event_t event)
+{
+    static const char* event_names[] = 
+    {
+        [WAPI_EVENT_INIT_SUCCESS]      = "INIT_SUCCESS",
+        [WAPI_EVENT_INIT_FAILED]       = "INIT_FAILED",
+        [WAPI_EVENT_CERT_AUTH_SUCCESS] = "CERT_AUTH_SUCCESS",
+        [WAPI_EVENT_CERT_AUTH_FAILED]  = "CERT_AUTH_FAILED",
+        [WAPI_EVENT_PWD_AUTH_SUCCESS]  = "PWD_AUTH_SUCCESS",
+        [WAPI_EVENT_PWD_AUTH_FAILED]   = "PWD_AUTH_FAILED",
+        [WAPI_EVENT_CONNECTED]         = "CONNECTED",
+        [WAPI_EVENT_CONNECT_FAILED]    = "CONNECT_FAILED",
+        [WAPI_EVENT_DISCONNECTED]      = "DISCONNECTED",
+        [WAPI_EVENT_ERROR]             = "ERROR"
+    };
+    
+    if (event < (sizeof(event_names) / sizeof(event_names[0])))
+        return event_names[event];
+    return "UNKNOWN";
+}
+
+/**
+ * @brief Get the current number of attached observers
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @return uint8_t Number of observers (0 if uninitialized)
+ */
+uint8_t wapi_subject_get_observer_count(m0804c_handler_t *const self)
+{
+    if (!self || !PRIV_DATA(self))
+        return 0;
+    
+    wapi_subject_t *subject = PRIV_DATA(self)->observer_subject;
+    if (!subject)
+        return 0;
+    
+    /* Count nodes in linked list */
+    uint8_t count = 0;
+    t_list_t *head = &subject->observers_sentinel;
+    for (t_list_t *current = head->next; current != head; current = current->next)
+    {
+        count++;
+    }
+    
+    return count;
 }
 
 

@@ -53,6 +53,22 @@ extern int SEGGER_RTT_printf(unsigned BufferIndex, const char *sFormat, ...);
 #define MAX_RECV_CNT_OF_CMD_SEND    1
 
 /**
+ * @enum at_handler_state_t
+ * @brief AT handler state machine states
+ * 
+ * Defines all possible states for the AT handler state machine to ensure
+ * proper state transition validation and error handling.
+ */
+typedef enum
+{
+    AT_STATE_UNINIT = 0,        /* Handler not initialized */
+    AT_STATE_IDLE,              /* Ready to send new command */
+    AT_STATE_SENDING,           /* Command transmission in progress */
+    AT_STATE_WAITING_RESPONSE,  /* Waiting for response from module */
+    AT_STATE_ERROR              /* Error state, requires reset */
+} at_handler_state_t;
+
+/**
  * @def AT_MAX_HOLDERS
  * @brief Maximum number of holder instances supported by one AT handler
  *
@@ -282,6 +298,22 @@ at_status_t at_recv_hook_register(at_handler_t *const self, pf_at_recv_parse_t h
  * @return at_status_t Operation status
  */
 at_status_t at_recv_hook_unregister(at_handler_t *const self);
+
+/**
+ * @brief Get current AT handler state
+ *
+ * @param self Pointer to the AT handler instance
+ * @return at_handler_state_t Current state (AT_STATE_UNINIT if self is NULL)
+ */
+at_handler_state_t at_get_state(at_handler_t *const self);
+
+/**
+ * @brief Get state name string for debugging
+ *
+ * @param state State value
+ * @return const char* State name string
+ */
+const char* at_get_state_name(at_handler_state_t state);
 
 /* call in IDLE ISR */
 void at_notify_recv_isr_cb(at_handler_t *const self);

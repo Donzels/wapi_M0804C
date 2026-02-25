@@ -8,14 +8,8 @@
 static void m0804c_open(struct m0804c_handler *const self);
 static void m0804c_close(struct m0804c_handler *const self);
 
-static void wapi_process_success_cb(struct m0804c_handler *const self, wapi_process_type_t process_type);
-static void wapi_process_err_cb(struct m0804c_handler *const self, wapi_process_type_t process_type);
-
 static wapi_info_t *m0804c_get_wapi_info(struct m0804c_handler *const self);
 static cert_file_t *m0804c_get_cert_file(struct m0804c_handler *const self);
-
-static void wapi_process_success_cb(struct m0804c_handler *const self, wapi_process_type_t process_type);
-static void wapi_process_err_cb(struct m0804c_handler *const self, wapi_process_type_t process_type);
 
 extern recv_buf_att_t g_wapi_uart_rx_buf;
 extern uart_ops_t g_wapi_uart_ops;
@@ -92,19 +86,24 @@ static wapi_data_provider_t wapi_data_provider =
     .pf_get_wapi_info = m0804c_get_wapi_info,
 }; 
 
-static wapi_callback_t wapi_callbacks = 
-{
-    .pf_process_success_cb = wapi_process_success_cb,
-    .pf_process_err_cb = wapi_process_err_cb,
-};
-
 static wapi_m0804c_input_arg_t wapi_input_arg = 
 {
     .at_input_arg = &wapi_at_input_arg,
     .os_interface = &g_wapi_os_interface, 
     .pwr_ops = &wapi_pwr_ops,     
-    .data_provider = &wapi_data_provider,
-    .callbacks = &wapi_callbacks     
+    .data_provider = &wapi_data_provider
+};
+
+/* Forward declaration */
+static void wapi_event_observer_notify(wapi_observer_t *observer, 
+                                       m0804c_handler_t *handler,
+                                       wapi_event_t event);
+
+/* WAPI event observer instance */
+static wapi_observer_t wapi_event_observer = 
+{
+    .on_notify = wapi_event_observer_notify,
+    .observer_context = NULL
 };
 
 static void wapi_at_recv_parse(uint8_t *buf, uint16_t len, void *arg)
@@ -112,6 +111,54 @@ static void wapi_at_recv_parse(uint8_t *buf, uint16_t len, void *arg)
     /* It's meaningless, as M0804C will response debug info after send */
     WAPI_COMMU_DEBUG_OUT("WAPI AT RECV PARSE CALLBACK\r\n");
     WAPI_COMMU_DEBUG_STRING(buf, len);
+}
+
+/**
+ * @brief Observer callback for WAPI events
+ * 
+ * This replaces the old process success/error callbacks with a more flexible
+ * observer pattern that can handle multiple events.
+ */
+static void wapi_event_observer_notify(wapi_observer_t *observer, 
+                                       m0804c_handler_t *handler,
+                                       wapi_event_t event)
+{
+    switch (event)
+    {
+        case WAPI_EVENT_INIT_SUCCESS:
+            WAPI_COMMU_DEBUG_OUT("WAPI INIT SUCCESS\r\n");
+            break;
+        case WAPI_EVENT_INIT_FAILED:
+            WAPI_COMMU_DEBUG_OUT("WAPI INIT FAILED\r\n");
+            break;
+        case WAPI_EVENT_CERT_AUTH_SUCCESS:
+            WAPI_COMMU_DEBUG_OUT("WAPI CERT AUTH SUCCESS\r\n");
+            break;
+        case WAPI_EVENT_CERT_AUTH_FAILED:
+            WAPI_COMMU_DEBUG_OUT("WAPI CERT AUTH FAILED\r\n");
+            break;
+        case WAPI_EVENT_PWD_AUTH_SUCCESS:
+            WAPI_COMMU_DEBUG_OUT("WAPI PWD AUTH SUCCESS\r\n");
+            break;
+        case WAPI_EVENT_PWD_AUTH_FAILED:
+            WAPI_COMMU_DEBUG_OUT("WAPI PWD AUTH FAILED\r\n");
+            break;
+        case WAPI_EVENT_CONNECTED:
+            WAPI_COMMU_DEBUG_OUT("WAPI CONNECTED\r\n");
+            break;
+        case WAPI_EVENT_CONNECT_FAILED:
+            WAPI_COMMU_DEBUG_OUT("WAPI CONNECT FAILED\r\n");
+            break;
+        case WAPI_EVENT_DISCONNECTED:
+            WAPI_COMMU_DEBUG_OUT("WAPI DISCONNECTED\r\n");
+            break;
+        case WAPI_EVENT_ERROR:
+            WAPI_COMMU_DEBUG_OUT("WAPI ERROR\r\n");
+            break;
+        default:
+            WAPI_COMMU_DEBUG_OUT("WAPI UNKNOWN EVENT: %d\r\n", event);
+            break;
+    }
 }
 
 static void wapi_commu_task(void *argument)
@@ -139,6 +186,16 @@ void wapi_commu_init(void)
         return;
     } 
     WAPI_COMMU_DEBUG_OUT("WAPI handler instance success\r\n");
+    
+    /* Attach observer for event notifications */
+    ret = wapi_subject_attach(&g_wapi_handler_inst, &wapi_event_observer);
+    if (WAPI_OK != ret)
+    {
+        WAPI_COMMU_DEBUG_ERR("Failed to attach WAPI event observer: %d\r\n", ret);
+        return;
+    }
+    WAPI_COMMU_DEBUG_OUT("WAPI event observer attached\r\n");
+    
     ret = m0804c_init(&g_wapi_handler_inst);
     if (WAPI_OK != ret)
     {
@@ -182,48 +239,6 @@ static wapi_info_t *m0804c_get_wapi_info(struct m0804c_handler *const self)
 static cert_file_t *m0804c_get_cert_file(struct m0804c_handler *const self)
 {
     return get_cert_file();
-}
-
-static void wapi_process_success_cb(struct m0804c_handler *const self, wapi_process_type_t process_type)
-{
-    switch (process_type)
-    {
-        case PROCESS_INIT:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS INIT SUCCESS\r\n");
-            break;
-        case PROCESS_CERT_AUTH:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS CERT AUTH SUCCESS\r\n");
-            break;
-        case PROCESS_PWD_AUTH:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS PWD AUTH SUCCESS\r\n");
-            break;
-        case PROCESS_CONNECT:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS CONNECT SUCCESS\r\n");
-            break;        
-        default:
-            break;
-    }
-}
-
-static void wapi_process_err_cb(struct m0804c_handler *const self, wapi_process_type_t process_type)
-{
-    switch (process_type)
-    {
-        case PROCESS_INIT:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS INIT ERROR\r\n");
-            break;
-        case PROCESS_CERT_AUTH:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS CERT AUTH ERROR\r\n");
-            break;
-        case PROCESS_PWD_AUTH:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS PWD AUTH ERROR\r\n");
-            break;
-        case PROCESS_CONNECT:
-            WAPI_COMMU_DEBUG_OUT("WAPI PROCESS CONNECT ERROR\r\n");
-            break;        
-        default:
-            break;
-    }
 }
 #endif
 

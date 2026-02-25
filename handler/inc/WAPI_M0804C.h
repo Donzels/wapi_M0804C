@@ -21,6 +21,7 @@
 
 #include "AT_handler.h"
 #include "stdbool.h"
+#include "t_list.h"
 
 #include "algo_data_integrity.h"
 #define M0804C_DATA_INTEGRITY_ALGO(buf, len)     checksum_16bit(buf, len)
@@ -66,6 +67,26 @@ typedef enum
     PROCESS_CONNECT
 }wapi_process_type_t;
 
+/**
+ * @enum wapi_handler_state_t
+ * @brief WAPI M0804C handler state machine states
+ * 
+ * Defines all possible operational states for the WAPI module handler.
+ * State transitions are controlled by process completion callbacks.
+ */
+typedef enum
+{
+    WAPI_STATE_UNINIT = 0,          /* Handler not initialized */
+    WAPI_STATE_INITING,             /* Initialization process running */
+    WAPI_STATE_INITED,              /* Initialization completed */
+    WAPI_STATE_CONFIGURING_CONN,    /* Connection configuration in progress */
+    WAPI_STATE_CONFIGURED,          /* Connection configured (cert/pwd) */
+    WAPI_STATE_CONNECTING,          /* Network connection in progress */
+    WAPI_STATE_CONNECTED,           /* Connected to network and server */
+    WAPI_STATE_DISCONNECTING,       /* Disconnection in progress */
+    WAPI_STATE_ERROR                /* Error state */
+} wapi_handler_state_t;
+
 /* ---------------- OSAL interface for M0804C handler ---------------- */
 typedef struct
 {
@@ -103,8 +124,81 @@ typedef struct
     file_att_t as_file;
     file_att_t asue_file;
 }cert_file_t;
+/* ============================================================================
+ * Observer Pattern Implementation for Event Notification System
+ * ============================================================================
+ * Provides flexible multi-observer support for WAPI events, allowing multiple
+ * listeners to react to connection state changes without tight coupling.
+ */
+
+/**
+ * @enum wapi_event_t
+ * @brief WAPI system events
+ *
+ * Defines all possible events that occur during WAPI module lifecycle
+ */
+typedef enum
+{
+    WAPI_EVENT_INIT_SUCCESS = 0,      /* Module initialization completed successfully */
+    WAPI_EVENT_INIT_FAILED,           /* Module initialization failed */
+    WAPI_EVENT_CERT_AUTH_SUCCESS,     /* Certificate-based authentication succeeded */
+    WAPI_EVENT_CERT_AUTH_FAILED,      /* Certificate-based authentication failed */
+    WAPI_EVENT_PWD_AUTH_SUCCESS,      /* Password-based authentication succeeded */
+    WAPI_EVENT_PWD_AUTH_FAILED,       /* Password-based authentication failed */
+    WAPI_EVENT_CONNECTED,             /* Connected to network and server */
+    WAPI_EVENT_CONNECT_FAILED,        /* Connection to network/server failed */
+    WAPI_EVENT_DISCONNECTED,          /* Disconnected from server/network */
+    WAPI_EVENT_ERROR,                 /* Critical error occurred */
+    WAPI_EVENT_COUNT                  /* Total event count (for bounds checking) */
+} wapi_event_t;
 
 typedef struct m0804c_handler m0804c_handler_t;
+/**
+ * @struct wapi_observer_t
+ * @brief Observer interface for WAPI events
+ *
+ * Describes an observer that wants to be notified of WAPI events.
+ * Each observer has a notification callback and optional context data.
+ */
+typedef struct wapi_observer
+{
+    /**
+     * Callback function invoked when an event is notified
+     * @param observer Pointer to this observer instance
+     * @param self Pointer to the WAPI handler that triggered the event
+     * @param event The WAPI event that occurred
+     */
+    void (*on_notify)(struct wapi_observer *observer, 
+                      struct m0804c_handler *const self,
+                      wapi_event_t event);
+    
+    void *observer_context;  /* Optional context data for the observer */
+} wapi_observer_t;
+
+/**
+ * @struct wapi_observer_node_t
+ * @brief Observer node for linked list management
+ *
+ * Wraps observer data in a linked list node for dynamic observer management.
+ * Similar to funcode_node_t in uart_proto for flexible extension.
+ */
+typedef struct
+{
+    t_list_t list;           /* Linked list node */
+    wapi_observer_t *observer; /* Pointer to observer */
+} wapi_observer_node_t;
+
+/**
+ * @struct wapi_subject_t
+ * @brief Subject/Event dispatcher for managing multiple observers
+ *
+ * Manages a collection of observers using linked list and notifies them of WAPI events.
+ * This implements the Subject part of the Observer pattern with unlimited observer capacity.
+ */
+typedef struct
+{
+    t_list_t observers_sentinel;  /* Sentinel head for linked list of observers */
+} wapi_subject_t;
 
 typedef struct
 {
@@ -120,18 +214,11 @@ typedef struct
 
 typedef struct
 {
-    void (*pf_process_success_cb)(struct m0804c_handler *const self, wapi_process_type_t process_type);
-    void (*pf_process_err_cb)(struct m0804c_handler *const self, wapi_process_type_t process_type);    
-} wapi_callback_t;
-
-typedef struct
-{
     /* at_cmd_set_table & parse_algo already built-in , so inject NULL */
     at_input_arg_t          *at_input_arg;  /* Pointer to AT handler input arguments */
     m0804c_os_interface_t   *os_interface;  /* OSAL interface for M0804C handler */
     m0804c_pwr_ops_t        *pwr_ops;       /* Power control operations */       
     wapi_data_provider_t    *data_provider; /* Data providers (info/cert) */
-    wapi_callback_t         *callbacks;     /* Event callbacks */
 }wapi_m0804c_input_arg_t;
 
 typedef struct m0804c_priv_data m0804c_priv_data_t;
@@ -162,6 +249,84 @@ wapi_status_t m0804c_send(m0804c_handler_t *const self, uint8_t *buf, uint16_t l
                          pf_at_recv_parse_t recv_parse_cb);
                          
 wapi_status_t m0804c_cert_upload(m0804c_handler_t *const self);
+
+/* ============================================================================
+ * Observer Pattern Public API
+ * ============================================================================
+ */
+
+/**
+ * @brief Attach an observer to receive WAPI events
+ *
+ * Registers an observer to receive notifications when WAPI events occur.
+ * The same observer instance can only be attached once.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @param observer Pointer to the observer structure with on_notify callback
+ * @return WAPI_OK on success
+ * @return WAPI_ERR_PARAM_INVALID if parameters are invalid or observer already attached
+ * @return WAPI_ERR_OTHERS if maximum observers exceeded
+ */
+wapi_status_t wapi_subject_attach(m0804c_handler_t *const self, wapi_observer_t *observer);
+
+/**
+ * @brief Detach an observer from event notifications
+ *
+ * Unregisters an observer so it no longer receives WAPI event notifications.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @param observer Pointer to the observer structure to remove
+ * @return WAPI_OK on success
+ * @return WAPI_ERR_PARAM_INVALID if observer not found or invalid parameters
+ */
+wapi_status_t wapi_subject_detach(m0804c_handler_t *const self, wapi_observer_t *observer);
+
+/**
+ * @brief Notify all attached observers of a WAPI event
+ *
+ * Called internally by the WAPI handler to dispatch events to all observers.
+ * Each observer's on_notify callback will be invoked synchronously.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @param event The WAPI event to dispatch to observers
+ */
+void wapi_subject_notify(m0804c_handler_t *const self, wapi_event_t event);
+
+/**
+ * @brief Get WAPI event name string for debugging
+ *
+ * Returns a human-readable name for a WAPI event enumeration value.
+ *
+ * @param event Event enumeration value
+ * @return const char* Event name string
+ */
+const char* wapi_get_event_name(wapi_event_t event);
+
+/**
+ * @brief Get current number of attached observers
+ *
+ * Returns the number of observers currently attached to the event system.
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @return uint8_t Number of observers (0 if self is NULL or uninitialized)
+ */
+uint8_t wapi_subject_get_observer_count(m0804c_handler_t *const self);
+
+/**
+ * @brief Get WAPI handler state
+ *
+ * @param self Pointer to the WAPI handler instance
+ * @return wapi_handler_state_t Current state (WAPI_STATE_UNINIT if self is NULL)
+ */
+wapi_handler_state_t wapi_get_state(m0804c_handler_t *const self);
+
+/**
+ * @brief Get WAPI state name string for debugging
+ *
+ * @param state State value
+ * @return const char* State name string
+ */
+const char* wapi_get_state_name(wapi_handler_state_t state);
 
 /* return true when valid, others invalid */
 bool is_wapi_info_valid(wapi_info_t *const wapi_info);

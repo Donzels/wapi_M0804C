@@ -88,6 +88,7 @@ typedef struct
 typedef struct at_priv_data
 {
     bool is_inited; /* Initialization flag: true = handler ready, false = uninitialized */
+    at_handler_state_t current_state; /* Current state machine state */
     uint8_t remain_receive_count;
     send_info_t send_info;
     pf_at_recv_parse_t recv_hook;
@@ -107,6 +108,64 @@ typedef struct
 
 
 /* Private Function Implementations ------------------------------------------*/
+
+/**
+ * @brief State transition validation and execution
+ *
+ * Validates if the state transition is allowed and updates the state.
+ *
+ * @param self Pointer to AT handler instance
+ * @param new_state Target state to transition to
+ * @return at_status_t AT_OK if transition is valid, error code otherwise
+ */
+static at_status_t at_state_transition(at_handler_t *const self, at_handler_state_t new_state)
+{
+    if (!self || !PRIV_DATA(self))
+        return AT_ERR_PARAM_INVALID;
+
+    at_handler_state_t old_state = PRIV_DATA(self)->current_state;
+    
+    /* Define valid state transitions */
+    bool is_valid = false;
+    switch (old_state)
+    {
+        case AT_STATE_UNINIT:
+            is_valid = (new_state == AT_STATE_IDLE || new_state == AT_STATE_ERROR);
+            break;
+        
+        case AT_STATE_IDLE:
+            is_valid = (new_state == AT_STATE_SENDING || new_state == AT_STATE_ERROR);
+            break;
+        
+        case AT_STATE_SENDING:
+            is_valid = (new_state == AT_STATE_WAITING_RESPONSE || new_state == AT_STATE_IDLE ||
+                       new_state == AT_STATE_ERROR);
+            break;
+        
+        case AT_STATE_WAITING_RESPONSE:
+            is_valid = (new_state == AT_STATE_IDLE || new_state == AT_STATE_ERROR);
+            break;
+        
+        case AT_STATE_ERROR:
+            is_valid = (new_state == AT_STATE_IDLE || new_state == AT_STATE_UNINIT);
+            break;
+        
+        default:
+            is_valid = false;
+            break;
+    }
+    
+    if (!is_valid)
+    {
+        AT_DEBUG_ERR("AT Invalid state transition: %s -> %s",
+                     at_get_state_name(old_state), at_get_state_name(new_state));
+        return AT_ERR_OTHERS;
+    }
+    
+    PRIV_DATA(self)->current_state = new_state;
+    AT_DEBUG_OUT("AT State transition: %s -> %s", at_get_state_name(old_state), at_get_state_name(new_state));
+    return AT_OK;
+}
 
 /**
  * @brief Count the number of %s/%d placeholders in a string
@@ -178,6 +237,13 @@ at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...)
         return AT_ERR_PARAM_INVALID;
     if(!PRIV_DATA(self)->is_inited)
         return AT_ERR_HANDLER_NOT_READY;
+    
+    /* State validation - must be in IDLE state to send new command */
+    if (PRIV_DATA(self)->current_state != AT_STATE_IDLE)
+    {
+        AT_DEBUG_ERR("Cannot send command in state: %s", at_get_state_name(PRIV_DATA(self)->current_state));
+        return AT_ERR_HANDLER_NOT_READY;
+    }
             
     /* Look up AT command template in command table */
     at_cmd_set_table_t *cmd_table = self->at_input_arg->at_cmd_set_table;
@@ -225,6 +291,9 @@ at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...)
         AT_DEBUG_ERR("Previous AT command not consumed, send feedback semaphore unavailable");
         return AT_ERR_NOT_CONSUMED;
     }      
+    
+    /* Transition to SENDING state */
+    at_state_transition(self, AT_STATE_SENDING);
         
     PRIV_DATA(self)->send_info.at_send_type = SEND_CMD;
     PRIV_DATA(self)->send_info.u.cmd_event.cmd_entry = cmd_entry;
@@ -235,6 +304,9 @@ at_status_t at_cmd_send_impl(at_handler_t *const self, uint32_t at_func, ...)
     UART_INTERFACE(self)->pf_uart_write(PRIV_DATA(self)->send_buf, strlen((char*)PRIV_DATA(self)->send_buf));
 
     TIMER_START(self, AT_TIMEOUT_TICK);
+    
+    /* Transition to WAITING_RESPONSE state */
+    at_state_transition(self, AT_STATE_WAITING_RESPONSE);
 
     return AT_OK;
 }
@@ -376,6 +448,8 @@ static void at_parse_algo(uint8_t *const p_data, uint16_t data_len, void *arg)
     {
         TIMER_STOP(self);
         RELEASE_SEND_FEEDBACK_SEMA(self);
+        /* Transition back to IDLE state */
+        at_state_transition(self, AT_STATE_IDLE);
         AT_DEBUG_OUT("AT command/transparent data reception completed" );
     }
     else
@@ -408,6 +482,11 @@ static void timeout_callback(void *timer_handle, void *arg)
         
     AT_DEBUG_ERR("AT response reception timeout");
     RELEASE_SEND_FEEDBACK_SEMA(self);
+    
+    /* Transition to ERROR state on timeout */
+    at_state_transition(self, AT_STATE_ERROR);
+    /* Recover to IDLE state after error handling */
+    at_state_transition(self, AT_STATE_IDLE);
 }
 
 /* Public Function Implementations -------------------------------------------*/
@@ -470,6 +549,7 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
         return AT_ERR_OTHERS;
     }
     PRIV_DATA(self)->is_inited = false; /* Mark as uninitialized during setup */
+    PRIV_DATA(self)->current_state = AT_STATE_UNINIT; /* Initialize state machine */
     PRIV_DATA(self)->recv_hook = NULL;
     PRIV_DATA(self)->recv_hook_arg = NULL;
     
@@ -519,6 +599,9 @@ at_status_t at_inst(at_handler_t *const self, at_input_arg_t *const p_input_args
 
     /* Mark handler as initialized and ready for use */
     PRIV_DATA(self)->is_inited = true;
+    
+    /* Transition to IDLE state after successful initialization */
+    at_state_transition(self, AT_STATE_IDLE);
 
     AT_DEBUG_OUT("AT handler initialized successfully");
     return AT_OK;
@@ -572,6 +655,37 @@ void at_reset_send_state(at_handler_t *const self)
         return;
     RELEASE_SEND_FEEDBACK_SEMA(self);
     reset_rx_state(PRIV_DATA(self)->uart_proto_handle);
+    
+    /* Force transition to IDLE state on reset */
+    if (PRIV_DATA(self)->current_state != AT_STATE_IDLE)
+    {
+        PRIV_DATA(self)->current_state = AT_STATE_IDLE;
+        AT_DEBUG_OUT("State forced to IDLE after reset");
+    }
     AT_DEBUG_OUT("AT handler send state reset");
+}
+
+/* Public State Query Functions ---------------------------------------------*/
+at_handler_state_t at_get_state(at_handler_t *const self)
+{
+    if (!self || !PRIV_DATA(self))
+        return AT_STATE_UNINIT;
+    return PRIV_DATA(self)->current_state;
+}
+
+const char* at_get_state_name(at_handler_state_t state)
+{
+    static const char* state_names[] = 
+    {
+        [AT_STATE_UNINIT]           = "UNINIT",
+        [AT_STATE_IDLE]             = "IDLE",
+        [AT_STATE_SENDING]          = "SENDING",
+        [AT_STATE_WAITING_RESPONSE] = "WAITING_RESPONSE",
+        [AT_STATE_ERROR]            = "ERROR"
+    };
+    
+    if (state < (sizeof(state_names) / sizeof(state_names[0])))
+        return state_names[state];
+    return "UNKNOWN";
 }
 
