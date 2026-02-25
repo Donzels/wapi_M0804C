@@ -1,5 +1,6 @@
 #include "wapi_commu.h"
 #include "main.h"
+#include <stdint.h>
 
 /* -------------------------------------------------------------------------- */
 /*                        Forward declarations (OSAL)                         */
@@ -99,11 +100,34 @@ static void wapi_event_observer_notify(wapi_observer_t *observer,
                                        m0804c_handler_t *handler,
                                        wapi_event_t event);
 
+/* Event handlers */
+static void wapi_event_handle_init_success(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_init_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_cert_auth_success(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_cert_auth_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_pwd_auth_success(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_pwd_auth_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_connected(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_connect_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_disconnected(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_error(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+static void wapi_event_handle_unknown(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+
+typedef struct
+{
+    uint16_t event_counts[WAPI_EVENT_COUNT];
+    wapi_event_t last_event;
+} wapi_event_ctx_t;
+
+static wapi_event_ctx_t g_wapi_event_ctx = {0};
+
+static void wapi_event_record(wapi_observer_t *observer, wapi_event_t event);
+
 /* WAPI event observer instance */
 static wapi_observer_t wapi_event_observer = 
 {
     .on_notify = wapi_event_observer_notify,
-    .observer_context = NULL
+    .observer_context = &g_wapi_event_ctx
 };
 
 static void wapi_at_recv_parse(uint8_t *buf, uint16_t len, void *arg)
@@ -112,6 +136,22 @@ static void wapi_at_recv_parse(uint8_t *buf, uint16_t len, void *arg)
     WAPI_COMMU_DEBUG_OUT("WAPI AT RECV PARSE CALLBACK\r\n");
     WAPI_COMMU_DEBUG_STRING(buf, len);
 }
+
+typedef void (*wapi_event_handler_t)(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event);
+
+static const wapi_event_handler_t wapi_event_handlers[WAPI_EVENT_COUNT] =
+{
+    [WAPI_EVENT_INIT_SUCCESS]      = wapi_event_handle_init_success,
+    [WAPI_EVENT_INIT_FAILED]       = wapi_event_handle_init_failed,
+    [WAPI_EVENT_CERT_AUTH_SUCCESS] = wapi_event_handle_cert_auth_success,
+    [WAPI_EVENT_CERT_AUTH_FAILED]  = wapi_event_handle_cert_auth_failed,
+    [WAPI_EVENT_PWD_AUTH_SUCCESS]  = wapi_event_handle_pwd_auth_success,
+    [WAPI_EVENT_PWD_AUTH_FAILED]   = wapi_event_handle_pwd_auth_failed,
+    [WAPI_EVENT_CONNECTED]         = wapi_event_handle_connected,
+    [WAPI_EVENT_CONNECT_FAILED]    = wapi_event_handle_connect_failed,
+    [WAPI_EVENT_DISCONNECTED]      = wapi_event_handle_disconnected,
+    [WAPI_EVENT_ERROR]             = wapi_event_handle_error
+};
 
 /**
  * @brief Observer callback for WAPI events
@@ -123,42 +163,106 @@ static void wapi_event_observer_notify(wapi_observer_t *observer,
                                        m0804c_handler_t *handler,
                                        wapi_event_t event)
 {
-    switch (event)
+    if (event < WAPI_EVENT_COUNT && wapi_event_handlers[event])
     {
-        case WAPI_EVENT_INIT_SUCCESS:
-            WAPI_COMMU_DEBUG_OUT("WAPI INIT SUCCESS\r\n");
-            break;
-        case WAPI_EVENT_INIT_FAILED:
-            WAPI_COMMU_DEBUG_OUT("WAPI INIT FAILED\r\n");
-            break;
-        case WAPI_EVENT_CERT_AUTH_SUCCESS:
-            WAPI_COMMU_DEBUG_OUT("WAPI CERT AUTH SUCCESS\r\n");
-            break;
-        case WAPI_EVENT_CERT_AUTH_FAILED:
-            WAPI_COMMU_DEBUG_OUT("WAPI CERT AUTH FAILED\r\n");
-            break;
-        case WAPI_EVENT_PWD_AUTH_SUCCESS:
-            WAPI_COMMU_DEBUG_OUT("WAPI PWD AUTH SUCCESS\r\n");
-            break;
-        case WAPI_EVENT_PWD_AUTH_FAILED:
-            WAPI_COMMU_DEBUG_OUT("WAPI PWD AUTH FAILED\r\n");
-            break;
-        case WAPI_EVENT_CONNECTED:
-            WAPI_COMMU_DEBUG_OUT("WAPI CONNECTED\r\n");
-            break;
-        case WAPI_EVENT_CONNECT_FAILED:
-            WAPI_COMMU_DEBUG_OUT("WAPI CONNECT FAILED\r\n");
-            break;
-        case WAPI_EVENT_DISCONNECTED:
-            WAPI_COMMU_DEBUG_OUT("WAPI DISCONNECTED\r\n");
-            break;
-        case WAPI_EVENT_ERROR:
-            WAPI_COMMU_DEBUG_OUT("WAPI ERROR\r\n");
-            break;
-        default:
-            WAPI_COMMU_DEBUG_OUT("WAPI UNKNOWN EVENT: %d\r\n", event);
-            break;
+        wapi_event_handlers[event](observer, handler, event);
     }
+    else
+    {
+        wapi_event_handle_unknown(observer, handler, event);
+    }
+}
+
+static void wapi_event_record(wapi_observer_t *observer, wapi_event_t event)
+{
+    if (!observer || !observer->observer_context)
+        return;
+
+    wapi_event_ctx_t *ctx = (wapi_event_ctx_t *)observer->observer_context;
+    if (event < WAPI_EVENT_COUNT)
+    {
+        ctx->event_counts[event]++;
+    }
+    ctx->last_event = event;
+    WAPI_COMMU_DEBUG_OUT("WAPI EVENT REC: %s cnt=%u\r\n", wapi_get_event_name(event),
+                         (event < WAPI_EVENT_COUNT) ? ctx->event_counts[event] : 0);
+}
+
+static void wapi_event_handle_init_success(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI INIT SUCCESS\r\n");
+}
+
+static void wapi_event_handle_init_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI INIT FAILED\r\n");
+}
+
+static void wapi_event_handle_cert_auth_success(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI CERT AUTH SUCCESS\r\n");
+}
+
+static void wapi_event_handle_cert_auth_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI CERT AUTH FAILED\r\n");
+}
+
+static void wapi_event_handle_pwd_auth_success(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI PWD AUTH SUCCESS\r\n");
+}
+
+static void wapi_event_handle_pwd_auth_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI PWD AUTH FAILED\r\n");
+}
+
+static void wapi_event_handle_connected(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI CONNECTED\r\n");
+}
+
+static void wapi_event_handle_connect_failed(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI CONNECT FAILED\r\n");
+}
+
+static void wapi_event_handle_disconnected(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI DISCONNECTED\r\n");
+}
+
+static void wapi_event_handle_error(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI ERROR\r\n");
+}
+
+static void wapi_event_handle_unknown(wapi_observer_t *observer, m0804c_handler_t *handler, wapi_event_t event)
+{
+    (void)handler;
+    wapi_event_record(observer, event);
+    WAPI_COMMU_DEBUG_OUT("APP WAPI UNKNOWN EVENT: %d\r\n", event);
 }
 
 static void wapi_commu_task(void *argument)

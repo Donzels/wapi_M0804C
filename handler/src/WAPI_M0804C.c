@@ -244,6 +244,7 @@ static wapi_status_t wapi_send_data(m0804c_handler_t *self, uint8_t *buf, uint16
 static wapi_status_t m0804c_start_recv(m0804c_handler_t *const self);
 
 static wapi_status_t wapi_subject_init(m0804c_handler_t *const self);
+static void wapi_subject_notify(m0804c_handler_t *const self, wapi_event_t event);
 /* ============================================================================
  * Global Data
  * ============================================================================ */
@@ -1790,8 +1791,9 @@ wapi_status_t wapi_subject_detach(m0804c_handler_t *const self, wapi_observer_t 
  *
  * @param self Pointer to the WAPI handler instance
  * @param event The WAPI event to notify observers about
+ * @internal This function is for internal use only
  */
-void wapi_subject_notify(m0804c_handler_t *const self, wapi_event_t event)
+static void wapi_subject_notify(m0804c_handler_t *const self, wapi_event_t event)
 {
     if (!self || !PRIV_DATA(self))
         return;

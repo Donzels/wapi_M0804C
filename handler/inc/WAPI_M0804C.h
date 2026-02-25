@@ -84,7 +84,8 @@ typedef enum
     WAPI_STATE_CONNECTING,          /* Network connection in progress */
     WAPI_STATE_CONNECTED,           /* Connected to network and server */
     WAPI_STATE_DISCONNECTING,       /* Disconnection in progress */
-    WAPI_STATE_ERROR                /* Error state */
+    WAPI_STATE_ERROR,               /* Error state */
+    WAPI_STATE_COUNT                /* Total state count (for bounds checking) */
 } wapi_handler_state_t;
 
 /* ---------------- OSAL interface for M0804C handler ---------------- */
@@ -282,27 +283,6 @@ wapi_status_t wapi_subject_attach(m0804c_handler_t *const self, wapi_observer_t 
 wapi_status_t wapi_subject_detach(m0804c_handler_t *const self, wapi_observer_t *observer);
 
 /**
- * @brief Notify all attached observers of a WAPI event
- *
- * Called internally by the WAPI handler to dispatch events to all observers.
- * Each observer's on_notify callback will be invoked synchronously.
- *
- * @param self Pointer to the WAPI handler instance
- * @param event The WAPI event to dispatch to observers
- */
-void wapi_subject_notify(m0804c_handler_t *const self, wapi_event_t event);
-
-/**
- * @brief Get WAPI event name string for debugging
- *
- * Returns a human-readable name for a WAPI event enumeration value.
- *
- * @param event Event enumeration value
- * @return const char* Event name string
- */
-const char* wapi_get_event_name(wapi_event_t event);
-
-/**
  * @brief Get current number of attached observers
  *
  * Returns the number of observers currently attached to the event system.
@@ -312,20 +292,9 @@ const char* wapi_get_event_name(wapi_event_t event);
  */
 uint8_t wapi_subject_get_observer_count(m0804c_handler_t *const self);
 
-/**
- * @brief Get WAPI handler state
- *
- * @param self Pointer to the WAPI handler instance
- * @return wapi_handler_state_t Current state (WAPI_STATE_UNINIT if self is NULL)
- */
-wapi_handler_state_t wapi_get_state(m0804c_handler_t *const self);
 
-/**
- * @brief Get WAPI state name string for debugging
- *
- * @param state State value
- * @return const char* State name string
- */
+wapi_handler_state_t wapi_get_state(m0804c_handler_t *const self);
+const char* wapi_get_event_name(wapi_event_t event);
 const char* wapi_get_state_name(wapi_handler_state_t state);
 
 /* return true when valid, others invalid */

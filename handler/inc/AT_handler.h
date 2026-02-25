@@ -65,7 +65,8 @@ typedef enum
     AT_STATE_IDLE,              /* Ready to send new command */
     AT_STATE_SENDING,           /* Command transmission in progress */
     AT_STATE_WAITING_RESPONSE,  /* Waiting for response from module */
-    AT_STATE_ERROR              /* Error state, requires reset */
+    AT_STATE_ERROR,             /* Error state, requires reset */
+    AT_STATE_COUNT              /* Total state count (for bounds checking) */
 } at_handler_state_t;
 
 /**
